@@ -100,4 +100,11 @@ endif()
 # Yoga logs through <android/log> when building for Android.
 if(ANDROID)
     target_link_libraries(yoga PRIVATE log)
+    # Android 15+ devices can use 16 KB memory pages, and a .so whose PT_LOAD segments
+    # are 4 KB aligned cannot be loaded on them (Google Play rejects such APKs outright).
+    # NDK r28 links with these by default, but CI takes whatever NDK the runner image
+    # carries, so the alignment is stated here instead of inherited from the toolchain.
+    target_link_options(yoga PRIVATE
+        -Wl,-z,max-page-size=16384
+        -Wl,-z,common-page-size=16384)
 endif()

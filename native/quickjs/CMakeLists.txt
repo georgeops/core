@@ -86,6 +86,16 @@ set_target_properties(quickjs PROPERTIES OUTPUT_NAME quickjs C_VISIBILITY_PRESET
 
 target_link_libraries(quickjs PRIVATE qjs)
 
+# Android 15+ devices can use 16 KB memory pages, and a .so whose PT_LOAD segments
+# are 4 KB aligned cannot be loaded on them (Google Play rejects such APKs outright).
+# NDK r28 links with these by default, but CI takes whatever NDK the runner image
+# carries, so the alignment is stated here instead of inherited from the toolchain.
+if(ANDROID)
+    target_link_options(quickjs PRIVATE
+        -Wl,-z,max-page-size=16384
+        -Wl,-z,common-page-size=16384)
+endif()
+
 # quickjs-atom.h is not an installed header -- the shim includes it to get the
 # predefined atom enum, so it needs the source tree, not just the public API.
 target_include_directories(quickjs PRIVATE ${quickjs_SOURCE_DIR} src)
