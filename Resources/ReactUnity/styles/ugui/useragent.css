@@ -1,0 +1,157 @@
+.react-unity__renderer__hidden {
+  display: none !important;
+}
+
+@font-face {
+  font-family: sans-serif;
+  src: url(resource:ReactUnity/fonts/sans-serif);
+}
+
+@font-face {
+  font-family: monospace;
+  src: url(resource:ReactUnity/fonts/monospace);
+}
+
+:root {
+  font-size: 16px;
+  font-family: sans-serif;
+  color: black;
+
+  z-index: revert;
+  sorting-layer: revert;
+}
+
+:graphic {
+  color: white;
+}
+
+br {
+  width: 0;
+  height: 0;
+  visibility: hidden;
+}
+
+br + br {
+  height: auto;
+}
+
+icon {
+  font-size: 24px;
+  text-align: center;
+  flex-grow: 0;
+  flex-shrink: 0;
+  flex-basis: auto;
+}
+
+button {
+  padding: 8px 12px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: row;
+  background-color: rgba(90%, 90%, 90%, 1);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+  appearance: button;
+  pointer-events: all;
+}
+
+input {
+  flex-direction: row;
+  padding: 8px;
+  max-width: 100%;
+  overflow: hidden;
+  background-color: white;
+  border-radius: 8px;
+  text-align: left;
+  vertical-align: middle;
+  cursor: text;
+  appearance: input;
+  pointer-events: all;
+}
+
+input::viewport {
+  max-width: 100%;
+  flex-grow: 1;
+}
+
+input::placeholder {
+  position: absolute;
+  opacity: 0.6;
+}
+
+input::selection {
+  background-color: rgba(168, 206, 255, 0.75);
+}
+
+scroll {
+  overflow: scroll;
+}
+
+/* scrollbar-color and scrollbar-width on the scroll feed these; a ::scrollbar rule overrides them. */
+scroll::scrollbar {
+  background-color: var(--scrollbar-track-color, rgb(210, 210, 210));
+  appearance: button;
+  width: var(--scrollbar-width, 12px);
+  height: var(--scrollbar-width, 12px);
+}
+
+scroll::scrollbar-thumb {
+  background-color: var(--scrollbar-thumb-color, rgb(170, 170, 170));
+}
+
+toggle {
+  width: 24px;
+  aspect-ratio: 1;
+  flex: 0 0 auto;
+  margin: 6px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: row;
+  background-color: rgba(82%, 82%, 82%, 1);
+  border-radius: 6px;
+  cursor: pointer;
+  appearance: toggle;
+  pointer-events: all;
+}
+
+/* The tick sprites are white, and the mark is the colour showing through them -- so an unchecked
+   toggle has no mask and paints nothing. It used to be a `multiply` blend, back when any blend mode
+   meant "tint the image and drop the colour" rather than what CSS says it means. */
+toggle:after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+  mask-size: contain;
+  mask-position: center;
+}
+
+toggle:checked:after,
+toggle:indeterminate:after {
+  background-color: black;
+}
+
+toggle:checked:after {
+  mask-image: url(res:ReactUnity/sprites/check);
+}
+
+toggle:indeterminate:after {
+  mask-image: url(res:ReactUnity/sprites/indeterminate);
+}
+
+anchor {
+  font-style: underline;
+  cursor: pointer;
+}
+
+label {
+  cursor: pointer;
+  flex-direction: row;
+  align-items: center;
+}
+
+portal {
+  transform-origin: top left;
+  position: absolute;
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@reactunity/quick-start",
+  "version": "0.0.1",
+  "description": "",
+  "main": "index.ts",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "start": "vite",
+    "build": "vite build",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@reactunity/renderer": "workspace:*",
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "sass": "^1.103.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}

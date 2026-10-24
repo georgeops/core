@@ -1,0 +1,258 @@
+using System.Collections;
+using Yoga;
+using ReactUnity.Helpers;
+using ReactUnity.Styling.Animations;
+using ReactUnity.Types;
+using ReactUnity.UGUI.Internal;
+using UnityEngine;
+
+namespace ReactUnity.UGUI.Behaviours
+{
+    [SelectionBase]
+    [AddComponentMenu("")]
+    [DefaultExecutionOrder(-10)]
+    public class ReactElement : MonoBehaviour, ITicked
+    {
+        private RectTransform rt;
+        public YogaNode Layout { get; internal set; }
+        public UGUIComponent Component { get; internal set; }
+        public TMPro.TextMeshProUGUI Text { get; internal set; }
+
+        private bool IsVisible = false;
+        private bool firstTime = true;
+        private Coroutine currentMotion;
+
+        private bool hasPositionUpdate = false;
+
+        private YogaValue2 translate = YogaValue2.Center;
+
+        public YogaValue2 Translate
+        {
+            get => translate;
+            set
+            {
+                if (value != translate)
+                {
+                    hasPositionUpdate = true;
+                    translate = value;
+                }
+            }
+        }
+
+        private YogaValue translateZ = YogaValue.Point(0);
+
+        public YogaValue TranslateZ
+        {
+            get => translateZ;
+            set
+            {
+                if (value.Unit != translateZ.Unit || value.Value != translateZ.Value)
+                {
+                    hasPositionUpdate = true;
+                    translateZ = value;
+                }
+            }
+        }
+
+        private PositionType positionType = PositionType.Relative;
+
+        public PositionType PositionType
+        {
+            get => positionType;
+            set
+            {
+                if (value != positionType)
+                {
+                    hasPositionUpdate = true;
+                    positionType = value;
+                }
+            }
+        }
+
+
+        int ITicked.TickIndex { get; set; } = -1;
+
+        private void OnEnable()
+        {
+            rt = transform as RectTransform;
+            IsVisible = false;
+            firstTime = true;
+            ReactElementTicker.Group.Add(this);
+        }
+
+        private void OnDisable() => ReactElementTicker.Group.Remove(this);
+
+        private void Start()
+        {
+            if (Layout == null)
+            {
+                Destroy(this);
+                return;
+            }
+        }
+
+        // Its LateUpdate, called by ReactElementTicker.
+        void ITicked.Tick()
+        {
+            if (Layout == null)
+            {
+                Destroy(this);
+                return;
+            }
+
+            var translate = this.translate;
+            // A sticky box moves with the scroll rather than with the layout, so it cannot wait for one.
+            var sticky = Component != null && Component.IsSticky;
+            if (!Layout.HasNewLayout && !hasPositionUpdate && !sticky) return;
+            if (float.IsNaN(Layout.LayoutWidth)) return;
+
+            if (Text)
+            {
+                Text.isRightToLeftText = Layout.LayoutDirection == YogaDirection.RTL;
+                ResolveTextInsets();
+            }
+
+            var pivotDiff = rt.pivot - Vector2.up;
+
+
+            var tran = new Vector2(
+                translate.X.GetPointValue(Layout.LayoutWidth, 0),
+                -translate.Y.GetPointValue(Layout.LayoutHeight, 0));
+            var visible = Layout.Display != YogaDisplay.None;
+
+            // CSS points +z at the viewer where a canvas points it away, the same flip a rotation
+            // gets -- so a `translateZ` that should come nearer does, once a `perspective` above
+            // it can show the difference.
+            var z = translateZ.Unit == YogaUnit.Point ? -translateZ.Value : 0;
+
+            var posX = Layout.LayoutLeft + pivotDiff.x * Layout.LayoutWidth;
+            var posY = -Layout.LayoutTop + pivotDiff.y * Layout.LayoutHeight;
+
+            // Sticky is the only offset resolved here rather than by layout, and it has to land the
+            // same frame the scroll moves -- so it never goes through `motion-duration`, which would
+            // chase it a frame behind.
+            var stickyOffset = Vector2.zero;
+            if (sticky && StickyPosition.TryResolve(Component, out var resolved, out _))
+                stickyOffset = new Vector2(resolved.x, -resolved.y);
+
+            SetPositionAndSize(new Vector2(posX, posY) + tran + stickyOffset,
+                new Vector2(Layout.LayoutWidth, Layout.LayoutHeight), z, visible, sticky);
+            hasPositionUpdate = false;
+            Layout.MarkLayoutSeen();
+        }
+
+        private void SetPositionAndSize(Vector2 pos, Vector2 size, float z, bool visible, bool forceImmediate = false)
+        {
+            var immediate = forceImmediate || !IsVisible || (visible != IsVisible);
+            IsVisible = visible;
+            if (immediate || firstTime || Component?.ComputedStyle == null)
+            {
+                // A motion still running would keep overwriting a position that is being tracked, not eased.
+                if (forceImmediate && currentMotion != null)
+                {
+                    StopCoroutine(currentMotion);
+                    currentMotion = null;
+                }
+
+                SetPositionAndSizeImmediate(pos, size, z);
+            }
+            else
+            {
+                var duration = Component.ComputedStyle.motionDuration;
+                var delay = Component.ComputedStyle.motionDelay;
+
+                if (duration > 0 || delay > 0)
+                {
+                    var timingFunction = Component.ComputedStyle.motionTimingFunction;
+
+                    if (currentMotion != null) StopCoroutine(currentMotion);
+                    currentMotion = StartCoroutine(StartMotion(pos, size, z, duration, delay, timingFunction));
+                }
+                else SetPositionAndSizeImmediate(pos, size, z);
+            }
+        }
+
+
+        private void SetPositionAndSizeImmediate(Vector2 pos, Vector2 size, float z)
+        {
+            firstTime = false;
+            rt.anchoredPosition = pos;
+            rt.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, size.x);
+            rt.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, size.y);
+            var lp = rt.localPosition;
+            rt.localPosition = new Vector3(lp.x, lp.y, z);
+        }
+
+
+        private IEnumerator StartMotion(Vector2 pos, Vector2 size, float z, float duration, float delay, TimingFunction timingFunction)
+        {
+            var timer = Component.Context.Timer;
+            var st = timer.AnimationTime;
+
+            if (delay > 0)
+            {
+                yield return Wait(delay);
+                st = st + delay;
+            }
+
+            if (duration <= 0)
+            {
+                SetPositionAndSizeImmediate(pos, size, z);
+                currentMotion = null;
+                yield break;
+            }
+
+            var end = st + duration;
+            var currentPos = rt.anchoredPosition;
+            var currentSize = rt.rect.size;
+            var currentZ = rt.localPosition.z;
+
+            while (timer.AnimationTime < end)
+            {
+                var delta = Mathf.Clamp01((timer.AnimationTime - st) / duration);
+                var intPos = Interpolater.Interpolate(currentPos, pos, delta, timingFunction);
+                var intSize = Interpolater.Interpolate(currentSize, size, delta, timingFunction);
+                var intZ = Interpolater.Interpolate(currentZ, z, delta, timingFunction);
+                SetPositionAndSizeImmediate(intPos, intSize, intZ);
+                yield return null;
+            }
+            SetPositionAndSizeImmediate(pos, size, z);
+            currentMotion = null;
+        }
+
+        /// <summary>
+        /// Keeps the glyph child inside the content box. It stretches over the whole element, so the
+        /// text would otherwise start at the border box's own edge -- and padding, which is measured
+        /// against, would show up as space on the far side of the line instead.
+        /// </summary>
+        private void ResolveTextInsets()
+        {
+            var left = Norm(Layout.LayoutPaddingLeft) + Norm(Layout.LayoutBorderLeft);
+            var right = Norm(Layout.LayoutPaddingRight) + Norm(Layout.LayoutBorderRight);
+            var top = Norm(Layout.LayoutPaddingTop) + Norm(Layout.LayoutBorderTop);
+            var bottom = Norm(Layout.LayoutPaddingBottom) + Norm(Layout.LayoutBorderBottom);
+
+            var trt = Text.rectTransform;
+            var min = new Vector2(left, bottom);
+            var max = new Vector2(-right, -top);
+
+            if (trt.offsetMin != min) trt.offsetMin = min;
+            if (trt.offsetMax != max) trt.offsetMax = max;
+        }
+
+        static float Norm(float value) => float.IsNaN(value) ? 0f : value;
+
+        private IEnumerator Wait(float delay)
+        {
+            var timer = Component.Context.Timer;
+
+            var st = timer.AnimationTime;
+            var end = st + delay;
+
+            while (timer.AnimationTime < end)
+            {
+                yield return null;
+            }
+        }
+    }
+}

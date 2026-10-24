@@ -1,0 +1,2102 @@
+using System;
+using System.Collections.Generic;
+using Yoga;
+using ReactUnity.Types;
+using ReactUnity.UGUI.Shapes;
+using UnityEngine;
+using UnityEngine.UI;
+
+namespace ReactUnity.UGUI.Internal
+{
+    /// <summary>
+    /// Renders an element's subtree into a RenderTexture and composites the result back in its
+    /// original slot with the CSS `filter` chain applied.
+    /// </summary>
+    /// <remarks>
+    /// The subtree is reparented under an offscreen canvas, which is the only way UGUI can render
+    /// one subtree in isolation -- a camera cullingMask cannot, because a ScreenSpaceOverlay canvas
+    /// has no camera. Losing the ancestor stencil that way is what CSS wants: an ancestor's
+    /// `overflow` clips the filtered result, and the composite (a MaskableGraphic left in place) is
+    /// clipped normally. Pointer events are routed back in by <see cref="FilterRaycaster"/>.
+    /// </remarks>
+    public class ElementFilter : MonoBehaviour, IBackdropReader
+    {
+        static readonly int MainTexId = Shader.PropertyToID("_MainTex");
+        static readonly int BackdropTexId = Shader.PropertyToID("_ReactUnityBackdrop");
+        static readonly int BackdropBoundId = Shader.PropertyToID("_ReactUnityBackdropBound");
+        static readonly int BlurId = Shader.PropertyToID("_Blur");
+        static readonly int BrightnessId = Shader.PropertyToID("_Brightness");
+        static readonly int ContrastId = Shader.PropertyToID("_Contrast");
+        static readonly int GrayscaleId = Shader.PropertyToID("_Grayscale");
+        static readonly int HueRotateId = Shader.PropertyToID("_HueRotate");
+        static readonly int InvertId = Shader.PropertyToID("_Invert");
+        static readonly int OpacityId = Shader.PropertyToID("_Opacity");
+        static readonly int SaturateId = Shader.PropertyToID("_Saturate");
+        static readonly int GrainId = Shader.PropertyToID("_Grain");
+        static readonly int PixelateId = Shader.PropertyToID("_Pixelate");
+        static readonly int SepiaId = Shader.PropertyToID("_Sepia");
+        static readonly int GrainPhaseId = Shader.PropertyToID("_GrainPhase");
+        static readonly int PosterizeId = Shader.PropertyToID("_Posterize");
+        static readonly int ScanlineIntensityId = Shader.PropertyToID("_ScanlineIntensity");
+        static readonly int ScanlinePeriodId = Shader.PropertyToID("_ScanlinePeriod");
+        static readonly int ScanlinePhaseId = Shader.PropertyToID("_ScanlinePhase");
+        static readonly int TintId = Shader.PropertyToID("_Tint");
+        static readonly int AberrationId = Shader.PropertyToID("_Aberration");
+        static readonly int ShadowTexId = Shader.PropertyToID("_ShadowTex");
+        static readonly int ShadowColorId = Shader.PropertyToID("_ShadowColor");
+        static readonly int ShadowOffsetId = Shader.PropertyToID("_ShadowOffset");
+        static readonly int BlendModeId = Shader.PropertyToID("_BlendMode");
+        static readonly int MaskTexId = Shader.PropertyToID("_MaskTex");
+        static readonly int MaskEnabledId = Shader.PropertyToID("_MaskEnabled");
+        static readonly int MaskLuminanceId = Shader.PropertyToID("_MaskLuminance");
+        static readonly int ClipKindId = Shader.PropertyToID("_ClipKind");
+        static readonly int ClipRegionId = Shader.PropertyToID("_ClipRegion");
+        static readonly int ClipBoxId = Shader.PropertyToID("_ClipBox");
+        static readonly int ClipRadiiXId = Shader.PropertyToID("_ClipRadiiX");
+        static readonly int ClipRadiiYId = Shader.PropertyToID("_ClipRadiiY");
+        static readonly int ClipCircleId = Shader.PropertyToID("_ClipCircle");
+        static readonly int ClipPolyId = Shader.PropertyToID("_ClipPoly");
+        static readonly int ClipPolyCountId = Shader.PropertyToID("_ClipPolyCount");
+        static readonly int ClipEvenOddId = Shader.PropertyToID("_ClipEvenOdd");
+        static readonly int ClipMaskTexId = Shader.PropertyToID("_ClipMaskTex");
+
+        // Two ring points per float4, matching RU_CLIP_POLY_SLOTS in ClipShapes.cginc. The array is
+        // always sent full: a uniform array's length is fixed by the first SetVectorArray call.
+        const int ClipPolySlots = 9;
+
+        // What the shader switches on, which is the shape's resolved form rather than the CSS
+        // function it was written as -- RU_CLIP_* in ClipShapes.cginc.
+        const int ClipKindNone = 0;
+        const int ClipKindBox = 1;
+        const int ClipKindEllipse = 2;
+        const int ClipKindRing = 3;
+        const int ClipKindMask = 4;
+
+        // A rasterized clip is a coverage field the composite samples, so its resolution only has
+        // to carry the softness of one edge. Past this the mask is stretched, which costs a shape
+        // the size of a screen a little sharpness rather than four megabytes of upload.
+        const int MaxMaskDimension = 1024;
+
+        // The exact support of the iterated kernel, so no blur can ever be clipped and none is
+        // over-allocated for: one pass reaches 4 taps at quarter spacing, so +/- its own radius,
+        // and n passes of r/sqrt(n) reach sqrt(n)*r -- at most 2r, since n is capped at 4.
+        const float BleedPerBlurUnit = 2f;
+        const int MaxDimension = 4096;
+
+        // The clearance the clip planes are given either side of what the subtree reaches, so nothing
+        // coplanar with one is caught by it.
+        const float ProjectionSlack = 8f;
+
+        // A corner at or past the eye has no projection -- the divide flips it through infinity --
+        // so it is dropped rather than dragging the capture region out to nothing.
+        const float MinProjectionW = 0.01f;
+
+        // And a cap on what a near-vertical child can ask the capture to grow by, since the divide
+        // grows without bound as it approaches the eye. Past this the lean is clipped, which is far
+        // better than a texture clamped to MaxDimension and stretched back over the whole box.
+        const float MaxProjectionBleed = 2000f;
+
+        // The growth is rounded up to this rather than to the pixel. A lean that moves every frame
+        // would otherwise resize the capture every frame, and the render texture is reallocated
+        // whenever its dimensions change -- so a card mid-flip would throw one away per frame.
+        const float ProjectionBleedStep = 16f;
+
+        // A plane the projection magnifies is captured denser, up to this; anything nearer the eye
+        // than 1/MaxFlatDensity of the distance goes through the frustum instead.
+        const float MaxFlatDensity = 2f;
+        const float FlatDensityStep = 0.25f;
+
+        // How far off one plane a graphic may stand, in the plane's units, and still count as on it.
+        const float PlaneEpsilon = 0.01f;
+
+        /// <summary>Off sends every projection through a frustum of its own. The flat path is meant to
+        /// match it, and the test that holds it to that needs both.</summary>
+        internal static bool FlatPlanes = true;
+
+        // Where the offscreen surfaces are parked, and how far apart. Every camera has the same
+        // culling mask, so two surfaces sharing a spot would each capture the other's subtree --
+        // the gap has to be wider than a camera's far plane. Slots are reused as filters go away,
+        // which keeps the coordinates small enough to stay exact.
+        const float SlotBase = 100000f;
+        const float SlotStride = 5000f;
+        static readonly Stack<int> freeSlots = new Stack<int>();
+        static int nextSlot;
+        private int slot = -1;
+        private Vector3 SlotPosition => new Vector3(0, 0, SlotBase + slot * SlotStride);
+
+        private UGUIComponent component;
+        private RectTransform self;
+
+        private Transform originalParent;
+        private int originalIndex;
+
+        private Canvas offscreenCanvas;
+        private Camera offscreenCamera;
+        private RenderTexture target;
+        private RenderTexture scratch;
+        private RenderTexture shadow;
+
+        // The mask's own surface, in a slot of its own so the two cameras cannot see each other's
+        // subtree. Built only once something asks for a mask.
+        private Canvas maskCanvas;
+        private Camera maskCamera;
+        private RectTransform maskRegion;
+        private RectTransform maskBox;
+        private RenderTexture maskTarget;
+        private int maskSlot = -1;
+        private readonly List<WebBackgroundImage> maskLayers = new List<WebBackgroundImage>();
+        private bool maskLuminance;
+
+        // What the mask that is already rendered was rendered for. Nothing in the subtree reaches
+        // it, so a capture taken because a child moved keeps the mask it has.
+        private bool maskDirty = true;
+        private Vector4 maskMargins;
+        private Vector2 maskRegionSize;
+        private Vector2 maskBoxSize;
+        private UnityEngine.Events.UnityAction markMaskDirty;
+
+        // The elements that read a backdrop from inside this capture, and their surfaces. Owned here
+        // rather than by the context's BackdropSurface because only this knows when the capture is
+        // taken, and the backdrops have to exist by then.
+        private readonly BackdropPass innerBackdrops = new BackdropPass();
+        private readonly List<IBackdropReader> innerReaders = new List<IBackdropReader>();
+        private readonly List<bool> innerStale = new List<bool>();
+        private readonly List<int> innerIndices = new List<int>();
+        private BackdropWatch innerWatch;
+
+        private RawImage composite;
+        private Material compositeMaterial;
+        private bool compositeBlends;
+        private Material blurMaterial;
+        private ClipPathRaycastFilter clipFilter;
+
+        private FilterDefinition definition;
+        public FilterDefinition Definition
+        {
+            get => definition;
+            set => definition = value;
+        }
+
+        private BackgroundBlendMode blendMode;
+        public BackgroundBlendMode BlendMode
+        {
+            get => blendMode;
+            set
+            {
+                if (blendMode == value) return;
+                blendMode = value;
+                EnsureCompositeMaterial();
+                uniformsDirty = true;
+            }
+        }
+
+        private bool isolated;
+        public bool Isolated
+        {
+            get => isolated;
+            set
+            {
+                if (isolated == value) return;
+                isolated = value;
+                ApplyIsolation();
+            }
+        }
+
+        private ClipPath clipShape = ClipPath.None;
+        public ClipPath ClipShape
+        {
+            get => clipShape;
+            set
+            {
+                var next = value ?? ClipPath.None;
+                if (Equals(clipShape, next)) return;
+                clipShape = next;
+                uniformsDirty = true;
+                if (clipFilter) clipFilter.Shape = next;
+            }
+        }
+
+        private float perspective;
+        /// <summary>
+        /// The <c>perspective</c> distance the subtree is projected through, in the element's own
+        /// units. Zero is <c>none</c>, which is the flat capture everything else gets.
+        /// </summary>
+        public float Perspective
+        {
+            get => perspective;
+            set
+            {
+                if (perspective == value) return;
+                var was = perspective;
+                perspective = value;
+                dirty = true;
+
+                // A camera keeps whatever projection matrix it was last handed, so dropping back to
+                // `none` has to give it back rather than simply stop writing one.
+                if (was > 0 && value <= 0 && offscreenCamera)
+                {
+                    offscreenCamera.orthographic = true;
+                    offscreenCamera.ResetProjectionMatrix();
+                }
+            }
+        }
+
+        private YogaValue2 perspectiveOrigin = YogaValue2.Center;
+        /// <summary>Where on the element's box the viewer stands, which is the point the projection
+        /// converges on. Y is measured from the top, as <c>transform-origin</c> is.</summary>
+        public YogaValue2 PerspectiveOrigin
+        {
+            get => perspectiveOrigin;
+            set
+            {
+                if (perspectiveOrigin == value) return;
+                perspectiveOrigin = value;
+                dirty = true;
+            }
+        }
+
+        /// <summary>Whether anything here needs the offscreen pass to keep running.</summary>
+        public bool HasMask => maskLayers.Count > 0;
+
+        // The subtree as the projection has to measure it: every descendant's corners, and how near
+        // and far the nearest and furthest of them end up. Kept between the two halves of a render.
+        private readonly List<RectTransform> projected = new List<RectTransform>();
+        private readonly Vector3[] cornerBuffer = new Vector3[4];
+        private float projectedNear;
+        private float projectedFar;
+
+        // A subtree lying in one plane is only warped by the projection, so it is captured face-on
+        // with the batch and warped onto the composite. The plane is the first graphic's.
+        private bool flat;
+        private RectTransform planeRef;
+        private Matrix4x4 planeMatrix;
+        private Rect planeRegion;
+        private Vector2Int planePx;
+        private float planeDensity = 1f;
+        private Vector3 planePoint;
+        private Vector3 planeS;
+        private Vector3 planeT;
+        private readonly List<Vector2> planePolygon = new List<Vector2>();
+        static readonly List<Vector2> clipA = new List<Vector2>();
+        static readonly List<Vector2> clipB = new List<Vector2>();
+
+        // Every composite, so a plane can tell another filter's texture from content of its own.
+        static readonly Dictionary<Graphic, ElementFilter> composites = new Dictionary<Graphic, ElementFilter>();
+        private PlaneWarp warp;
+        private Quaternion captureRotation = Quaternion.identity;
+
+        // The bounds of what the plane holds, before any clipping, and the one filter whose composite
+        // is all it holds -- which this can draw straight onto its warp instead of capturing it.
+        private Rect planeBounds;
+        private ElementFilter planeOnly;
+        private ElementFilter passThrough;
+        private ElementFilter borrower;
+
+        /// <summary>Whether the last capture was of a flat plane the composite warps. For tests.</summary>
+        public bool CapturesFlat => flat;
+
+        private readonly List<Graphic> graphics = new List<Graphic>();
+        private readonly List<Graphic> maskGraphics = new List<Graphic>();
+        private readonly List<Graphic> registered = new List<Graphic>();
+        private UnityEngine.Events.UnityAction markDirty;
+        private FilterDefinition lastRendered;
+        private Rect lastRect;
+        private bool dirty = true;
+        private bool uniformsDirty = true;
+        private Vector4 shadowOffsetUv;
+        private float texelsPerUnitY = 1f;
+        private float uvPerUnitX;
+        private Vector4 clipRegion;
+        private readonly Vector4[] clipPolyBuffer = new Vector4[ClipPolySlots];
+
+        // The shape as the shader will read it, worked out once per uniform push -- SetUniforms runs
+        // twice whenever UGUI substitutes a stencil copy of the material, and resolving a path
+        // twice for that would flatten its curves twice.
+        private Rect referenceBox;
+        private ClipPath.Resolved resolvedClip;
+        private int clipKind;
+
+        // A rasterized clip, and what it was rasterized for: the contour array is kept by the
+        // ClipPath that produced it, so its identity is enough to say nothing has moved.
+        private Texture2D clipMask;
+        private object clipMaskKey;
+        private Vector4 clipMaskRegion;
+
+        /// <summary>How many offscreen renders this filter has done. For tests.</summary>
+        public int RenderCount { get; private set; }
+
+        /// <summary>How many backdrops this filter has rendered for the readers inside it. For tests.</summary>
+        public int InnerBackdropRenderCount => innerBackdrops.RenderCount;
+
+        // Where the capture is framed, and how far the batch moved the surface to pack it. The
+        // subtree count is what separates the element's own graphics from the mask layers appended
+        // after them, which live on another surface entirely and would blow the cell up.
+        private Vector3 captureCentre;
+        private Vector3 batchShift;
+        private readonly List<bool> batchChanged = new List<bool>();
+
+        // The element moving or turning keeps the capture: the composite and the raycasting camera
+        // follow it from where they stood relative to it. Each graphic is judged by where it stands
+        // relative to the element, so the element's own motion does not read as a change inside.
+        private Vector3 lastScale;
+        private bool placementDirty;
+        private Vector4 placedMargins;
+        private Vector3 captureLocalCentre;
+        private Vector3 cameraLocalPosition;
+        private Quaternion cameraLocalRotation = Quaternion.identity;
+        private readonly List<Matrix4x4> placements = new List<Matrix4x4>();
+
+        // How far the surface is shifted to turn it about the element rather than its own origin.
+        private Vector3 unturn;
+        private int subtreeGraphics;
+        private int queuedFrame = -1;
+        private int capturePxWidth;
+        private int capturePxHeight;
+
+        public static ElementFilter Create(UGUIComponent cmp, FilterDefinition definition, BackgroundBlendMode blendMode, bool isolated, ClipPath clipShape)
+        {
+            var filter = cmp.GameObject.AddComponent<ElementFilter>();
+            filter.component = cmp;
+            filter.definition = definition;
+            filter.blendMode = blendMode;
+            filter.isolated = isolated;
+            filter.clipShape = clipShape ?? ClipPath.None;
+            filter.Attach();
+            return filter;
+        }
+
+        void Attach()
+        {
+            markDirty = Invalidate;
+            markMaskDirty = InvalidateMask;
+            self = transform as RectTransform;
+            originalParent = self.parent;
+            originalIndex = self.GetSiblingIndex();
+
+            var ctx = component.Context;
+
+            // The composite takes the element's place in the original hierarchy, so it inherits the
+            // ancestor stencil and gets clipped by any `overflow: hidden` above it.
+            var compGo = ctx.CreateNativeObject("[Filter]", typeof(RectTransform), typeof(RawImage));
+            composite = compGo.GetComponent<RawImage>();
+            composite.raycastTarget = false;
+            composites[composite] = this;
+
+            // Off until the first Render below has a capture to show. A RawImage with no texture
+            // samples the white one, so an element whose filter is attached after this frame's
+            // LateUpdate drew as a solid white quad for the frame in between.
+            composite.enabled = false;
+            var compRect = compGo.transform as RectTransform;
+            compRect.SetParent(originalParent, false);
+            compRect.SetSiblingIndex(originalIndex);
+
+            // A `clip-path` changes the element's shape, so it has to keep pointers out of what it
+            // cut away as well as pixels. Hung off the composite, where Graphic.Raycast starts.
+            clipFilter = compGo.AddComponent<ClipPathRaycastFilter>();
+            clipFilter.Shape = clipShape;
+
+            EnsureCompositeMaterial();
+            blurMaterial = new Material(Resources.Load<Shader>("ReactUnity/shaders/FilterBlur"));
+
+            var canvasGo = ctx.CreateNativeObject("[FilterSurface]", typeof(RectTransform), typeof(Canvas));
+            offscreenCanvas = canvasGo.GetComponent<Canvas>();
+            offscreenCanvas.renderMode = RenderMode.WorldSpace;
+
+            var camGo = ctx.CreateNativeObject("[FilterCamera]", typeof(Camera));
+            offscreenCamera = camGo.GetComponent<Camera>();
+            offscreenCamera.orthographic = true;
+            offscreenCamera.clearFlags = CameraClearFlags.SolidColor;
+            offscreenCamera.backgroundColor = Color.clear;
+            offscreenCamera.cullingMask = 1 << canvasGo.layer;
+            offscreenCamera.enabled = false;
+            Lighten(offscreenCamera);
+            camGo.transform.SetParent(canvasGo.transform, false);
+
+            // Collected under one object rather than left loose at the root, which is where a
+            // canvas that has to stay `WorldSpace` can go -- see UGUIContext.FilterRoot.
+            canvasGo.transform.SetParent(ctx.FilterRoot, false);
+
+            // Park the surface far from the scene, and in a slot of its own.
+            slot = freeSlots.Count > 0 ? freeSlots.Pop() : nextSlot++;
+            canvasGo.transform.position = SlotPosition;
+
+            // Events reach the subtree through the composite: the pointer lands on the composite's
+            // rect, which is remapped into the offscreen camera's screen space and cast there.
+            offscreenCanvas.worldCamera = offscreenCamera;
+            var raycaster = canvasGo.AddComponent<FilterRaycaster>();
+            raycaster.EventViewport = compRect;
+            raycaster.HostCanvas = ctx.RootCanvas;
+            raycaster.Composite = composite;
+
+            // The top of the subtree is where the event system's walk up the hierarchy stops, so
+            // anything nothing inside handled carries on from the composite instead.
+            canvasGo.AddComponent<FilterEventBubble>().Composite = composite;
+
+            self.SetParent(canvasGo.transform, false);
+
+            ApplyIsolation();
+        }
+
+        /// <summary>
+        /// Carries the other half of <c>isolation: isolate</c> -- not inheriting parent CanvasGroups
+        /// -- onto the composite. The element's own group went offscreen with the subtree, where
+        /// there are no parent groups left to ignore, so without this an ancestor's opacity would
+        /// quietly start applying to an element the moment it isolated.
+        /// </summary>
+        /// <summary>What the batch's camera leaves off as well: a capture is an 8-bit texture of UI,
+        /// with no use for an HDR intermediate or an occlusion query.</summary>
+        internal static void Lighten(Camera cam)
+        {
+            cam.allowHDR = false;
+            cam.allowMSAA = false;
+            cam.useOcclusionCulling = false;
+        }
+
+        void ApplyIsolation()
+        {
+            if (!composite) return;
+
+            var group = composite.GetComponent<CanvasGroup>();
+            if (!group)
+            {
+                if (!isolated) return;
+                group = composite.gameObject.AddComponent<CanvasGroup>();
+            }
+            group.ignoreParentGroups = isolated;
+        }
+
+        #region Mask
+
+        /// <summary>
+        /// The <c>mask-image</c> layers, taking the same values <c>background-image</c> does. They are
+        /// drawn to a texture of their own that the composite multiplies into its alpha.
+        /// </summary>
+        /// <remarks>
+        /// This is what a mask costs to have soft edges. A UGUI <see cref="UnityEngine.UI.Mask"/> is
+        /// a stencil, and a stencil bit is either set or not -- so under one, the fade every
+        /// `linear-gradient` mask is written for came out as a hard edge at the alpha clip
+        /// threshold, or as nothing at all.
+        /// </remarks>
+        public void SetMask(
+            ICssValueList<ImageDefinition> images,
+            ICssValueList<YogaValue> positionsX,
+            ICssValueList<YogaValue> positionsY,
+            ICssValueList<BackgroundSize> sizes,
+            ICssValueList<BackgroundRepeat> repeatXs,
+            ICssValueList<BackgroundRepeat> repeatYs,
+            MaskMode mode
+        )
+        {
+            var count = images?.Count ?? 0;
+            var luminance = mode == MaskMode.Luminance;
+
+            if (luminance != maskLuminance)
+            {
+                maskLuminance = luminance;
+                uniformsDirty = true;
+            }
+
+            if (count == 0)
+            {
+                if (maskLayers.Count > 0) ClearMask();
+                return;
+            }
+
+            EnsureMaskSurface();
+
+            while (maskLayers.Count > count) DestroyLastMaskLayer();
+            while (maskLayers.Count < count) CreateMaskLayer();
+
+            var rendering = component.ComputedStyle.imageRendering;
+            var pixelated = rendering == ImageRendering.Pixelated || rendering == ImageRendering.CrispEdges;
+
+            var len = maskLayers.Count;
+            for (int i = 0; i < len; i++)
+            {
+                // CSS declares the topmost layer first, and the last child drawn is the one on top.
+                var layer = maskLayers[len - 1 - i];
+                layer.Pixelated = pixelated;
+                layer.SetBackgroundColorAndImage(Color.white, images.Get(i));
+                layer.BackgroundRepeatX = repeatXs.Get(i);
+                layer.BackgroundRepeatY = repeatYs.Get(i);
+                layer.BackgroundPosition = new YogaValue2(positionsX.Get(i), positionsY.Get(i));
+                layer.BackgroundSize = sizes.Get(i);
+            }
+        }
+
+        void EnsureMaskSurface()
+        {
+            if (maskCanvas) return;
+
+            var ctx = component.Context;
+
+            var canvasGo = ctx.CreateNativeObject("[FilterMaskSurface]", typeof(RectTransform), typeof(Canvas));
+            maskCanvas = canvasGo.GetComponent<Canvas>();
+            maskCanvas.renderMode = RenderMode.WorldSpace;
+
+            var camGo = ctx.CreateNativeObject("[FilterMaskCamera]", typeof(Camera));
+            maskCamera = camGo.GetComponent<Camera>();
+            maskCamera.orthographic = true;
+            maskCamera.clearFlags = CameraClearFlags.SolidColor;
+            // Transparent black, so whatever no layer covers is what the mask hides -- which is the
+            // mask painting area falling outside the border box, exactly as on the web.
+            maskCamera.backgroundColor = Color.clear;
+            maskCamera.cullingMask = 1 << canvasGo.layer;
+            maskCamera.enabled = false;
+            Lighten(maskCamera);
+            maskCamera.nearClipPlane = 0.01f;
+            maskCamera.farClipPlane = 1000f;
+            camGo.transform.SetParent(canvasGo.transform, false);
+            camGo.transform.localPosition = new Vector3(0, 0, -100);
+            maskCanvas.worldCamera = maskCamera;
+
+            canvasGo.transform.SetParent(ctx.FilterRoot, false);
+
+            // Its own slot: every camera here shares a culling mask, so two surfaces at one spot
+            // would each capture the other.
+            maskSlot = freeSlots.Count > 0 ? freeSlots.Pop() : nextSlot++;
+            canvasGo.transform.position = new Vector3(0, 0, SlotBase + maskSlot * SlotStride);
+
+            // The region is the whole capture, the box only the element -- so the mask's uv lines up
+            // with the composite's while the layers themselves never see the filter region.
+            maskRegion = Centred(ctx, "[MaskRegion]", canvasGo.transform);
+            maskBox = Centred(ctx, "[MaskBox]", maskRegion);
+        }
+
+        static RectTransform Centred(UGUIContext ctx, string name, Transform parent)
+        {
+            var rt = ctx.CreateNativeObject(name, typeof(RectTransform)).transform as RectTransform;
+            rt.SetParent(parent, false);
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = Vector2.zero;
+            return rt;
+        }
+
+        void CreateMaskLayer()
+        {
+            var go = component.Context.CreateNativeObject("[MaskLayer]", typeof(RectTransform), typeof(WebBackgroundImage));
+            var layer = go.GetComponent<WebBackgroundImage>();
+            layer.Context = component.Context;
+            layer.color = Color.clear;
+            layer.raycastTarget = false;
+
+            var rt = go.transform as RectTransform;
+            rt.SetParent(maskBox, false);
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.sizeDelta = Vector2.zero;
+            rt.anchoredPosition = Vector2.zero;
+
+            layer.RegisterDirtyVerticesCallback(markMaskDirty);
+            layer.RegisterDirtyMaterialCallback(markMaskDirty);
+
+            maskLayers.Add(layer);
+            dirty = true;
+            maskDirty = true;
+        }
+
+        void DestroyLastMaskLayer()
+        {
+            var i = maskLayers.Count - 1;
+            var layer = maskLayers[i];
+            maskLayers.RemoveAt(i);
+            if (layer)
+            {
+                layer.UnregisterDirtyVerticesCallback(markMaskDirty);
+                layer.UnregisterDirtyMaterialCallback(markMaskDirty);
+                DestroyImmediate(layer.gameObject);
+            }
+            dirty = true;
+            maskDirty = true;
+        }
+
+        void ClearMask()
+        {
+            while (maskLayers.Count > 0) DestroyLastMaskLayer();
+
+            if (maskCanvas) Destroy(maskCanvas.gameObject);
+            maskCanvas = null;
+            maskCamera = null;
+            maskRegion = null;
+            maskBox = null;
+            Release(ref maskTarget);
+
+            if (maskSlot >= 0)
+            {
+                freeSlots.Push(maskSlot);
+                maskSlot = -1;
+            }
+
+            uniformsDirty = true;
+        }
+
+        /// <summary>Draws the layers over the same region the capture covers, at the same resolution.</summary>
+        void RenderMask(int pxWidth, int pxHeight, float width, float height, Vector4 margins)
+        {
+            if (!maskCanvas || maskLayers.Count == 0) return;
+
+            var regionSize = new Vector2(width, height);
+            var boxSize = self.rect.size;
+
+            // The mask is the layers drawn into the filter region, and the subtree is not in it --
+            // so a capture taken because a child moved re-uses the mask already rendered. Worth the
+            // bookkeeping because the render is a URP camera entry, which costs the same whatever
+            // it draws.
+            if (!maskDirty && maskTarget && maskTarget.width == pxWidth && maskTarget.height == pxHeight
+                && maskMargins == margins && maskRegionSize == regionSize && maskBoxSize == boxSize) return;
+
+            if (!maskTarget || maskTarget.width != pxWidth || maskTarget.height != pxHeight)
+            {
+                Release(ref maskTarget);
+                maskTarget = Allocate(pxWidth, pxHeight, 24);
+            }
+
+            maskRegion.sizeDelta = regionSize;
+            maskBox.sizeDelta = boxSize;
+            // The box sits off the region's centre by however lopsided the filter region is.
+            maskBox.anchoredPosition = new Vector2((margins.x - margins.y) * 0.5f, (margins.z - margins.w) * 0.5f);
+
+            maskCamera.orthographicSize = height / 2f;
+            maskCamera.aspect = (float) pxWidth / pxHeight;
+            maskCamera.targetTexture = maskTarget;
+
+            // Cleared before the render, not after: a layer rebuilt during it raises its callback
+            // from in there, and that has to survive into the next frame rather than be wiped here.
+            maskDirty = false;
+            maskMargins = margins;
+            maskRegionSize = regionSize;
+            maskBoxSize = boxSize;
+
+            maskCamera.Render();
+        }
+
+        #endregion
+
+        /// <summary>
+        /// Puts the subtree back where it was and removes the filter. Use this rather than
+        /// destroying the component -- OnDestroy also runs while the whole GameObject is going
+        /// away, and reparenting a dying object is an error.
+        /// </summary>
+        /// <param name="immediate">For an element going back to the pool, which can be reused and
+        /// given a filter of its own before a deferred destroy would have run.</param>
+        public void Detach(bool immediate = false)
+        {
+            if (self && originalParent)
+            {
+                self.SetParent(originalParent, false);
+                self.SetSiblingIndex(originalIndex);
+            }
+            originalParent = null;
+            if (composite) composite.enabled = false;
+            if (immediate) DestroyImmediate(this);
+            else Destroy(this);
+        }
+
+        void OnDestroy()
+        {
+            graphics.Clear();
+            Reregister();
+
+            if (slot >= 0)
+            {
+                freeSlots.Push(slot);
+                slot = -1;
+            }
+
+            if (maskSlot >= 0)
+            {
+                freeSlots.Push(maskSlot);
+                maskSlot = -1;
+            }
+
+            maskLayers.Clear();
+            composites.Remove(composite);
+
+            if (composite)
+            {
+                // Asked for rather than made, like the inner backdrops: taking a registration out
+                // has no reason to put a register in, and during a context teardown -- which is
+                // where this runs -- there is no host to hang one on and the property is null.
+                if (compositeBlends && BackdropSurface.Required)
+                {
+                    var surface = component?.Context?.ExistingBackdropSurface;
+                    if (surface) surface.Unregister(this);
+                }
+                Destroy(composite.gameObject);
+            }
+            if (offscreenCanvas) Destroy(offscreenCanvas.gameObject);
+            if (maskCanvas) Destroy(maskCanvas.gameObject);
+            if (compositeMaterial) Destroy(compositeMaterial);
+            if (blurMaterial) Destroy(blurMaterial);
+            Release(ref target);
+            Release(ref scratch);
+            Release(ref shadow);
+            Release(ref maskTarget);
+            ReleaseClipMask();
+
+            // Whatever was reading this capture is back on the screen's backdrop now, and the next
+            // pass over the register hands it one.
+            for (int i = 0; i < innerReaders.Count; i++) innerReaders[i]?.SetBackdrop(null);
+            innerReaders.Clear();
+            innerBackdrops.Release();
+            innerWatch?.Reset();
+        }
+
+        static void Release(ref RenderTexture rt)
+        {
+            if (!rt) return;
+            rt.Release();
+            Destroy(rt);
+            rt = null;
+        }
+
+        float ScaleFactor
+        {
+            get
+            {
+                var root = component?.Context?.RootCanvas;
+                return root ? Mathf.Max(root.scaleFactor, 0.01f) : 1f;
+            }
+        }
+
+        /// <summary>
+        /// Points the composite at the shader its blend mode needs. Reading the backdrop costs a
+        /// grab per object, so only an element that actually blends is given the shader that pays
+        /// for one -- a plain `filter` keeps the cheap composite.
+        /// </summary>
+        void EnsureCompositeMaterial()
+        {
+            var blends = blendMode != BackgroundBlendMode.Normal;
+            if (compositeMaterial && compositeBlends == blends) return;
+
+            if (compositeMaterial) Destroy(compositeMaterial);
+            compositeBlends = blends;
+            compositeMaterial = new Material(Resources.Load<Shader>(blends ? "ReactUnity/shaders/FilterBlend" : "ReactUnity/shaders/Filter"));
+            if (composite) composite.material = compositeMaterial;
+            uniformsDirty = true;
+
+            // A pipeline with no GrabPass has to render the backdrop instead, and only the elements
+            // that read one are kept out of it.
+            if (composite && BackdropSurface.Required)
+            {
+                var surface = component.Context.BackdropSurface;
+                if (blends) surface.Register(this);
+                else surface.Unregister(this);
+            }
+        }
+
+        public CanvasRenderer BackdropRenderer => composite ? composite.canvasRenderer : null;
+
+        // The backdrop here serves `mix-blend-mode`, which blends the composite with what is under
+        // it pixel for pixel. The filter's own blur is applied to the capture, not to this.
+        public float BackdropBleed => 0f;
+
+        public void SetBackdrop(Texture backdrop)
+        {
+            // Only the blend shader has the property; a mode flipped back to `normal` unregisters,
+            // but not before this frame's surface has already been handed out.
+            if (!compositeMaterial || !compositeBlends) return;
+
+            compositeMaterial.SetTexture(BackdropTexId, backdrop);
+            compositeMaterial.SetFloat(BackdropBoundId, backdrop ? 1 : 0);
+
+            // The stencil copy UGUI substitutes under a mask is a different material object, and it
+            // is the one actually drawn -- the same split SetUniforms has to work around.
+            var drawn = composite ? composite.materialForRendering : null;
+            if (drawn && drawn != compositeMaterial)
+            {
+                drawn.SetTexture(BackdropTexId, backdrop);
+                drawn.SetFloat(BackdropBoundId, backdrop ? 1 : 0);
+            }
+        }
+
+        /// <summary>
+        /// Renders on the next frame even if nothing looks like it changed.
+        /// </summary>
+        public void Invalidate()
+        {
+            dirty = true;
+        }
+
+        /// <summary>A mask layer's own pixels changed -- an animated mask-position, or an image that
+        /// has just loaded. The capture is unaffected; only the mask has to be taken again.</summary>
+        void InvalidateMask() => maskDirty = true;
+
+        /// <summary>
+        /// True when anything that could alter the captured pixels has moved since the last render.
+        /// Missing a change here shows a stale frame, so this errs towards re-rendering: a graphic
+        /// rebuild, any descendant transform moving, the element resizing, or a new filter value.
+        /// </summary>
+        bool PollDirty()
+        {
+            if (!Equals(lastRendered, definition))
+            {
+                // A colour op is a uniform the composite reads at draw time, so animating one only
+                // has to push the uniforms again -- re-capturing the subtree would change nothing.
+                if (lastRendered == null || CaptureDiffers(lastRendered, definition)) dirty = true;
+                lastRendered = definition;
+                uniformsDirty = true;
+            }
+
+            if (self.rect != lastRect)
+            {
+                lastRect = self.rect;
+                dirty = true;
+            }
+
+            // A `clip-path` measured against the padding or content box follows the element's own
+            // border and padding, neither of which changes the rect above -- so the box is polled
+            // rather than waiting for something else to notice.
+            var box = ReferenceBox(self.rect, clipShape, component?.Layout);
+            if (box != referenceBox)
+            {
+                referenceBox = box;
+                uniformsDirty = true;
+                if (clipFilter) clipFilter.ClipBox = box;
+            }
+
+            // Also the element itself. Its scale sets the capture's resolution; a move or a turn
+            // stays out of the capture and only carries the composite along.
+            if (self.hasChanged)
+            {
+                self.hasChanged = false;
+                if (self.localScale != lastScale)
+                {
+                    lastScale = self.localScale;
+                    dirty = true;
+                }
+                else placementDirty = true;
+            }
+
+            // A rebuild raises the callbacks below, but moving a child only sets its transform --
+            // the canvas re-batches without any graphic going dirty.
+            graphics.Clear();
+            self.GetComponentsInChildren(true, graphics);
+            subtreeGraphics = graphics.Count;
+
+            // The mask layers hang off their own surface rather than the subtree, so they have to be
+            // appended by hand -- through a second list, since the List overload clears what it is
+            // given. From here on they are watched exactly like everything else.
+            if (maskBox)
+            {
+                maskBox.GetComponentsInChildren(true, maskGraphics);
+                graphics.AddRange(maskGraphics);
+            }
+
+            if (graphics.Count != registered.Count) Reregister();
+            else
+            {
+                for (int i = 0; i < graphics.Count; i++)
+                {
+                    if (graphics[i] == registered[i]) continue;
+                    Reregister();
+                    break;
+                }
+            }
+
+            for (int i = 0; i < graphics.Count; i++)
+            {
+                var t = graphics[i].transform;
+                if (!t.hasChanged) continue;
+                t.hasChanged = false;
+
+                if (i < subtreeGraphics && i < placements.Count)
+                {
+                    var placed = PlacementOf(t);
+                    if (placed.Equals(placements[i])) continue;
+                    placements[i] = placed;
+                }
+                dirty = true;
+            }
+
+            return dirty;
+        }
+
+        /// <summary>Where a transform stands relative to the element, from local values alone --
+        /// the surfaces are parked far enough out that a world-space round trip loses precision.</summary>
+        Matrix4x4 PlacementOf(Transform t)
+        {
+            var m = Matrix4x4.identity;
+            for (; t && t != self; t = t.parent) m = Matrix4x4.TRS(t.localPosition, t.localRotation, t.localScale) * m;
+            return m;
+        }
+
+        void Reregister()
+        {
+            for (int i = 0; i < registered.Count; i++)
+            {
+                if (!registered[i]) continue;
+                registered[i].UnregisterDirtyVerticesCallback(markDirty);
+                registered[i].UnregisterDirtyMaterialCallback(markDirty);
+            }
+
+            registered.Clear();
+            registered.AddRange(graphics);
+            dirty = true;
+
+            placements.Clear();
+            for (int i = 0; i < subtreeGraphics && i < graphics.Count; i++) placements.Add(PlacementOf(graphics[i].transform));
+
+            for (int i = 0; i < registered.Count; i++)
+            {
+                registered[i].RegisterDirtyVerticesCallback(markDirty);
+                registered[i].RegisterDirtyMaterialCallback(markDirty);
+            }
+        }
+
+        /// <summary>Whether the offscreen capture would come out different, as opposed to only the
+        /// uniforms the composite is drawn with. Everything here feeds the filter region or a blur.</summary>
+        static bool CaptureDiffers(FilterDefinition a, FilterDefinition b)
+        {
+            return a.Blur != b.Blur || a.DropShadowBlur != b.DropShadowBlur ||
+                   a.DropShadowOffset != b.DropShadowOffset || (a.DropShadowColor.a > 0) != (b.DropShadowColor.a > 0) ||
+                   AberrationBleed(a) != AberrationBleed(b);
+        }
+
+        /// <summary>The margin an aberration needs, whole pixels -- so animating one through a
+        /// couple of pixels re-captures a couple of times rather than on every frame.</summary>
+        static float AberrationBleed(FilterDefinition d) => Mathf.Ceil(Mathf.Abs(d.ChromaticAberration));
+
+        void LateUpdate() => Refresh(false);
+
+        void Refresh(bool force)
+        {
+            if (definition == null || !composite) return;
+
+            bool recapture;
+            using (ReactUnity.Helpers.ReactProfiling.FilterPoll.Auto()) recapture = PollDirty() || force;
+            if (recapture)
+            {
+                dirty = false;
+                Render();
+            }
+            else if (placementDirty) Place();
+            placementDirty = false;
+
+            if (recapture || uniformsDirty) PushUniforms();
+        }
+
+        /// <summary>
+        /// A filter inside this one has re-captured. Its composite is still the same graphic
+        /// drawing the same texture, so nothing is dirtied -- but that texture now holds different
+        /// pixels, and this capture holds the old ones.
+        /// </summary>
+        void NoteInnerCapture(Graphic inner)
+        {
+            // Before the early out: a queued capture still takes its inner backdrops after this.
+            innerWatch?.NoteRepaint(inner);
+
+            // Already queued, and the flush takes the deeper captures first.
+            if (queuedFrame == Time.frameCount) return;
+
+            // This frame's LateUpdate has been and gone, so the capture is queued now, for the pass
+            // after the inner one, rather than showing a frame-old copy of it.
+            Refresh(true);
+        }
+
+        /// <summary>
+        /// Hands the composite what it is drawn with. UGUI substitutes a stencil copy of the material
+        /// under an ancestor mask, and that copy is not what the values were written to -- so they go
+        /// to whatever is actually being drawn as well, every time UGUI rebuilds it.
+        /// </summary>
+        void PushUniforms()
+        {
+            uniformsDirty = false;
+
+            // Drawing the inner filter's texture, so with its chain as well.
+            var source = passThrough ? passThrough : this;
+            if (!passThrough) PrepareClip();
+            source.SetUniforms(compositeMaterial);
+            var drawn = composite.materialForRendering;
+            if (drawn && drawn != compositeMaterial) source.SetUniforms(drawn);
+
+            if (borrower && borrower.passThrough == this) borrower.PushUniforms();
+        }
+
+        void Render()
+        {
+            var rect = self.rect;
+            var scale = ScaleFactor;
+            var hasShadow = definition.DropShadowColor.a > 0;
+
+            // The filter region, as CSS has one: how far past each edge of the element the capture
+            // has to reach. A blur grows it evenly, a drop-shadow only on the side it falls.
+            var blurBleed = Mathf.Ceil(definition.Blur * BleedPerBlurUnit);
+            var shadowBleed = hasShadow ? Mathf.Ceil(definition.DropShadowBlur * BleedPerBlurUnit) : 0f;
+            var offset = hasShadow ? definition.DropShadowOffset : Vector2.zero;
+
+            // Chromatic aberration reads one offset either side, and needs transparent margin to
+            // read there -- against the sampler's clamp the outer edge would have no fringe at all.
+            var sideBleed = Mathf.Max(blurBleed, AberrationBleed(definition));
+
+            // The rect's y grows upwards where the shadow's offset grows down.
+            var mLeft = Mathf.Ceil(Mathf.Max(sideBleed, shadowBleed - offset.x));
+            var mRight = Mathf.Ceil(Mathf.Max(sideBleed, shadowBleed + offset.x));
+            var mBottom = Mathf.Ceil(Mathf.Max(blurBleed, shadowBleed + offset.y));
+            var mTop = Mathf.Ceil(Mathf.Max(blurBleed, shadowBleed - offset.y));
+
+            // A projection throws a leaning child outside its parent's box, so the capture has to
+            // reach wherever it lands -- past the filter region on any side that asks for more.
+            if (perspective > 0) MeasureProjection(rect, ref mLeft, ref mRight, ref mBottom, ref mTop);
+
+            // An odd difference would put the frame's centre on a half pixel, and half a pixel of
+            // offset moves 2.75% of text pixels -- which reads as shimmer on anything animating.
+            if (Mathf.Abs(mRight - mLeft) % 2f != 0f) mRight += 1f;
+            if (Mathf.Abs(mTop - mBottom) % 2f != 0f) mTop += 1f;
+
+            var width = rect.width + mLeft + mRight;
+            var height = rect.height + mBottom + mTop;
+            if (width <= 0 || height <= 0) return;
+
+            // The element's own rotate and scale are kept out of the capture and put on the
+            // composite instead, so the chain runs in the element's local space: a rotation does not
+            // tilt `pixelate` blocks, and a blur widens with the element as CSS says it should.
+            var sx = Mathf.Abs(self.localScale.x);
+            var sy = Mathf.Abs(self.localScale.y);
+            if (sx < 0.0001f || sy < 0.0001f) return;
+
+            // Judged against the frame the frustum would have drawn, which is the composite's rect.
+            flat = FindPlane(rect, new Rect(rect.xMin - mLeft, rect.yMin - mBottom, width, height), scale);
+            if (flat) SquarePlane();
+            else Unturn();
+
+            SetPassThrough(flat ? PassThroughSource() : null);
+            if (passThrough) planeRegion = planeBounds;
+
+            // Whole device pixels: a fractional RT shifts glyph edges sub-pixel (measured: a half
+            // pixel moves 2.75% of pixels), while an aligned one is bit-identical to drawing in place.
+            var pxWidth = flat ? planePx.x : Mathf.Clamp(Mathf.CeilToInt(width * sx * scale), 1, MaxDimension);
+            var pxHeight = flat ? planePx.y : Mathf.Clamp(Mathf.CeilToInt(height * sy * scale), 1, MaxDimension);
+
+            if (!passThrough) EnsureTarget(pxWidth, pxHeight, hasShadow);
+
+            // Aim in world space: the camera hangs off the surface canvas, not off the element, so
+            // the element's own anchoredPosition would otherwise be left out and the capture would
+            // be taken from somewhere inside the element instead of around it. Taking the element's
+            // rotation frames it square-on, which is what leaves the capture transform-free.
+            var worldCentre = flat
+                ? planeRef.TransformPoint(planeRegion.center)
+                : self.TransformPoint(rect.center + new Vector2((mRight - mLeft) * 0.5f, (mTop - mBottom) * 0.5f));
+            captureRotation = flat ? planeRef.rotation : self.rotation;
+
+            // Both of these are already in RT terms, so they follow the element's scale through
+            // pxWidth/pxHeight and keep the frame exactly as square as the texture is.
+            var halfW = pxWidth / scale / 2f;
+            var halfH = pxHeight / scale / 2f;
+
+            // With nothing to capture the camera only frames the plane, for the raycaster's sake.
+            if (passThrough)
+            {
+                halfW = planeRef.TransformVector(new Vector3(planeRegion.width, 0, 0)).magnitude / 2f;
+                halfH = planeRef.TransformVector(new Vector3(0, planeRegion.height, 0)).magnitude / 2f;
+            }
+
+            if (perspective > 0 && !flat) FrameProjected(rect, worldCentre, halfW, halfH);
+            else
+            {
+                // A camera keeps the projection matrix it was last handed, including a frustum.
+                if (!offscreenCamera.orthographic)
+                {
+                    offscreenCamera.orthographic = true;
+                    offscreenCamera.ResetProjectionMatrix();
+                }
+                offscreenCamera.transform.SetPositionAndRotation(worldCentre - captureRotation * Vector3.forward * 100f, captureRotation);
+                offscreenCamera.orthographicSize = halfH;
+                offscreenCamera.aspect = halfW / halfH;
+                offscreenCamera.nearClipPlane = 0.01f;
+                offscreenCamera.farClipPlane = 1000f;
+            }
+
+            if (flat) Warp();
+            else if (warp) warp.Clear();
+
+            capturePxWidth = pxWidth;
+            capturePxHeight = pxHeight;
+            captureCentre = worldCentre;
+            batchShift = Vector3.zero;
+
+            captureLocalCentre = self.InverseTransformPoint(worldCentre);
+            cameraLocalPosition = self.InverseTransformPoint(offscreenCamera.transform.position);
+            cameraLocalRotation = Quaternion.Inverse(self.rotation) * offscreenCamera.transform.rotation;
+
+            var margins = new Vector4(mLeft, mRight, mBottom, mTop);
+
+            if (passThrough)
+            {
+                // The inner capture already is the plane, so it goes onto the warp as it stands.
+                FilterBatch.Remove(this);
+                PlaceComposite(margins);
+                composite.texture = passThrough.target;
+                composite.enabled = true;
+                uniformsDirty = true;
+                return;
+            }
+
+            // Queued either way: the flush takes captures deepest first, which is what lets one
+            // filter draw another's composite as it stands this frame rather than the last.
+            queuedFrame = Time.frameCount;
+            RenderCount++;
+
+            // Packed with the others if it can be: the render is what costs, and one render serves
+            // as many captures as fit in a texture. The camera above stays aimed either way -- the
+            // raycaster reads it to put pointer events back into the subtree.
+            if (Batchable() && TryPack(halfW, halfH, scale, margins, width, height)) return;
+
+            FilterBatch.EnqueueAlone(this, NestingDepth(), margins, width, height);
+        }
+
+        /// <summary>
+        /// Turns the surface against the element's own rotation, about the element, so the element
+        /// stands square in the world. The capture is square-on either way; standing square is what
+        /// lets it share the batch's unturned camera.
+        /// </summary>
+        void Unturn()
+        {
+            var surface = offscreenCanvas.transform;
+
+            // Back to full size, if a flat plane last had it scaled up.
+            var rescaled = surface.localScale != Vector3.one;
+            if (rescaled) surface.localScale = Vector3.one;
+
+            var turn = Quaternion.Inverse(self.localRotation);
+            var local = Vector3.Scale(surface.lossyScale, self.localPosition);
+            var shift = local - turn * local;
+
+            if (!rescaled && surface.rotation == turn && shift == unturn) return;
+            unturn = shift;
+            surface.SetPositionAndRotation(SlotPosition + unturn + batchShift, turn);
+        }
+
+        /// <summary>
+        /// Whether everything the subtree draws lies in one plane. A projection only warps a plane,
+        /// so a face-on capture of it -- which the batch can take -- is all the composite needs.
+        /// </summary>
+        /// <remarks>
+        /// Measured from local values alone, like the placements, so the surface's own turn does not
+        /// enter into it. Only the part of the plane the frustum would have drawn is captured: what is
+        /// in front of the eye and projects inside <paramref name="frame"/>. Each of those limits is a
+        /// straight line on the plane, so that part is a convex polygon, and it is what the warp draws.
+        /// </remarks>
+        bool FindPlane(Rect rect, Rect frame, float scale)
+        {
+            planeRef = null;
+            if (!FlatPlanes || perspective <= 0 || !FlatEligible()) return false;
+
+            var toPlane = Matrix4x4.identity;
+            var min = new Vector2(float.MaxValue, float.MaxValue);
+            var max = new Vector2(float.MinValue, float.MinValue);
+
+            // Another filter's composite is already a texture at the plane's resolution, so a plane of
+            // nothing else gains nothing from a denser capture however far it is magnified.
+            var texturesOnly = true;
+            var count = 0;
+            planeOnly = null;
+
+            for (int i = 0; i < subtreeGraphics && i < graphics.Count; i++)
+            {
+                var g = graphics[i];
+                if (!g || !g.isActiveAndEnabled) continue;
+
+                var placed = PlacementOf(g.transform);
+                if (!planeRef)
+                {
+                    if (Mathf.Abs(placed.determinant) < 1e-9f) return RejectPlane();
+                    planeRef = g.rectTransform;
+                    planeMatrix = placed;
+                    toPlane = placed.inverse;
+                }
+
+                // Facing along the plane's normal, either way round, and with every corner on it.
+                var rel = toPlane * placed;
+                var normal = rel.MultiplyVector(Vector3.forward);
+                if (Mathf.Abs(normal.x) + Mathf.Abs(normal.y) > PlaneEpsilon * Mathf.Abs(normal.z)) return RejectPlane();
+
+                var r = g.rectTransform.rect;
+                for (int c = 0; c < 4; c++)
+                {
+                    var p = rel.MultiplyPoint3x4(new Vector3(c < 2 ? r.xMin : r.xMax, (c & 1) == 0 ? r.yMin : r.yMax, 0));
+                    if (Mathf.Abs(p.z) > PlaneEpsilon) return RejectPlane();
+                    min = Vector2.Min(min, p);
+                    max = Vector2.Max(max, p);
+                }
+
+                count++;
+                if (composites.TryGetValue(g, out var owner)) planeOnly = owner;
+                else texturesOnly = false;
+            }
+
+            if (!planeRef || max.x <= min.x || max.y <= min.y) return RejectPlane();
+            if (count != 1 || !texturesOnly) planeOnly = null;
+            planeBounds = Rect.MinMaxRect(min.x, min.y, max.x, max.y);
+
+            Vector3 Depthen(Vector4 v) => new Vector3(v.x, v.y, Depth(v));
+            planePoint = Depthen(planeMatrix.GetColumn(3));
+            planeS = Depthen(planeMatrix.GetColumn(0));
+            planeT = Depthen(planeMatrix.GetColumn(1));
+
+            // w = w0 + s * ws + t * wt, and each frame edge compares an affine X against its bound
+            // times w -- so all five limits are half-planes in (s, t).
+            var eye = OriginPoint(rect);
+            var k = 1f / perspective;
+            var w0 = 1f + k * planePoint.z;
+            var ws = k * planeS.z;
+            var wt = k * planeT.z;
+
+            clipA.Clear();
+            clipA.Add(new Vector2(min.x, min.y));
+            clipA.Add(new Vector2(min.x, max.y));
+            clipA.Add(new Vector2(max.x, max.y));
+            clipA.Add(new Vector2(max.x, min.y));
+
+            ClipPolygon(clipA, clipB, ws, wt, w0 - MinProjectionW);
+            ClipEdge(clipB, clipA, 0, frame.xMin - eye.x, 1f, eye, w0, ws, wt);
+            ClipEdge(clipA, clipB, 0, frame.xMax - eye.x, -1f, eye, w0, ws, wt);
+            ClipEdge(clipB, clipA, 1, frame.yMin - eye.y, 1f, eye, w0, ws, wt);
+            ClipEdge(clipA, clipB, 1, frame.yMax - eye.y, -1f, eye, w0, ws, wt);
+            if (clipB.Count < 3) return RejectPlane();
+
+            // Nearest the eye is the most magnified, and a vertex is always the extreme.
+            var minW = float.MaxValue;
+            min = new Vector2(float.MaxValue, float.MaxValue);
+            max = new Vector2(float.MinValue, float.MinValue);
+            for (int i = 0; i < clipB.Count; i++)
+            {
+                var p = clipB[i];
+                minW = Mathf.Min(minW, w0 + ws * p.x + wt * p.y);
+                min = Vector2.Min(min, p);
+                max = Vector2.Max(max, p);
+            }
+            if (max.x <= min.x || max.y <= min.y) return RejectPlane();
+            if (!texturesOnly && minW < 1f / MaxFlatDensity) return RejectPlane();
+
+            // Surface units per plane unit, which is the capture's resolution before any density.
+            var perUnit = new Vector2(
+                Vector3.Scale(self.localScale, planeMatrix.MultiplyVector(Vector3.right)).magnitude,
+                Vector3.Scale(self.localScale, planeMatrix.MultiplyVector(Vector3.up)).magnitude);
+            if (perUnit.x < 1e-6f || perUnit.y < 1e-6f) return RejectPlane();
+
+            var size = (max - min) * perUnit * scale;
+            var fit = Mathf.Min(MaxDimension / size.x, MaxDimension / size.y);
+            if (fit < 1f) return RejectPlane();
+
+            var density = texturesOnly ? 1f : Mathf.Clamp(Mathf.Ceil(1f / minW / FlatDensityStep) * FlatDensityStep, 1f, MaxFlatDensity);
+            density = Mathf.Min(density, fit);
+
+            planePx = new Vector2Int(Mathf.Max(1, Mathf.CeilToInt(size.x * density)), Mathf.Max(1, Mathf.CeilToInt(size.y * density)));
+            planeDensity = density;
+
+            // Widened to whole capture pixels about its centre, so the warp's uv and the capture agree.
+            var half = new Vector2(planePx.x / (density * scale * perUnit.x), planePx.y / (density * scale * perUnit.y)) * 0.5f;
+            var centre = (min + max) * 0.5f;
+            planeRegion = Rect.MinMaxRect(centre.x - half.x, centre.y - half.y, centre.x + half.x, centre.y + half.y);
+
+            planePolygon.Clear();
+            planePolygon.AddRange(clipB);
+            return true;
+        }
+
+        bool RejectPlane()
+        {
+            planeRef = null;
+            planeOnly = null;
+            return false;
+        }
+
+        /// <summary>
+        /// The inner filter whose composite is all the plane holds, when drawing that composite
+        /// straight onto the warp comes out as a capture of it would: no chain here to run, and
+        /// nothing between the two to fade, clip or blend it. That skips this capture entirely.
+        /// </summary>
+        ElementFilter PassThroughSource()
+        {
+            var inner = planeOnly;
+            if (!inner || !definition.Equals(FilterDefinition.Default) || blendMode != BackgroundBlendMode.Normal) return null;
+
+            var c = inner.composite;
+            if (!c || !c.enabled || !inner.target || c.color != Color.white || inner.compositeBlends) return null;
+            if (inner.warp && inner.warp.Warping) return null;
+
+            for (var t = c.transform; t; t = t.parent)
+            {
+                if (t.TryGetComponent<CanvasGroup>(out var group) && group.alpha < 1f) return null;
+                // A disabled mask clips nothing, and a parked clip stencil or overflow mask leaves one.
+                if ((t.TryGetComponent<Mask>(out var mask) && mask.enabled) || t.TryGetComponent<RectMask2D>(out _)) return null;
+                if (t == self) break;
+            }
+            return inner;
+        }
+
+        void SetPassThrough(ElementFilter source)
+        {
+            if (passThrough != source)
+            {
+                if (passThrough && passThrough.borrower == this) passThrough.borrower = null;
+                passThrough = source;
+                uniformsDirty = true;
+            }
+            if (source) source.borrower = this;
+        }
+
+        /// <summary>Keeps what projects on the inner side of one frame edge, <c>sign * (X - eye - b * w) >= 0</c>
+        /// along <paramref name="axis"/>, with the bound <paramref name="b"/> measured from the eye.</summary>
+        void ClipEdge(List<Vector2> from, List<Vector2> to, int axis, float b, float sign, Vector2 eye, float w0, float ws, float wt)
+        {
+            ClipPolygon(from, to,
+                sign * (planeS[axis] - b * ws),
+                sign * (planeT[axis] - b * wt),
+                sign * (planePoint[axis] - eye[axis] - b * w0));
+        }
+
+        /// <summary>One Sutherland-Hodgman step: what of the polygon lies where a*s + b*t + c >= 0.</summary>
+        static void ClipPolygon(List<Vector2> from, List<Vector2> to, float a, float b, float c)
+        {
+            to.Clear();
+            for (int i = 0; i < from.Count; i++)
+            {
+                var cur = from[i];
+                var prev = from[(i + from.Count - 1) % from.Count];
+                var dc = a * cur.x + b * cur.y + c;
+                var dp = a * prev.x + b * prev.y + c;
+
+                if ((dc >= 0) != (dp >= 0)) to.Add(prev + (cur - prev) * (dp / (dp - dc)));
+                if (dc >= 0) to.Add(cur);
+            }
+        }
+
+        /// <summary>Only a chain that works pixel by pixel survives the warp; blur, shadow, mask and
+        /// clip are all laid out in the element's box, which the warped capture no longer is.</summary>
+        bool FlatEligible()
+        {
+            if (maskLayers.Count > 0 || (clipShape != null && clipShape.Kind != ClipPathKind.None)) return false;
+            var d = definition;
+            return d.Blur <= 0 && d.DropShadowColor.a <= 0 && d.Pixelate <= 0 && d.ScanlineIntensity <= 0 &&
+                d.ChromaticAberration == 0 && d.Grain <= 0;
+        }
+
+        /// <summary>Depth along the element's z, at its own scale, as the projection divides by it.</summary>
+        float Depth(Vector3 local) => local.z * self.localScale.z;
+
+        /// <summary>
+        /// Turns the surface so the plane stands square in the world, about the plane's centre, and
+        /// scales it up by the density the warp will magnify it by. Unturn undoes both.
+        /// </summary>
+        void SquarePlane()
+        {
+            var surface = offscreenCanvas.transform;
+            var turn = Quaternion.Inverse(Quaternion.Inverse(surface.rotation) * planeRef.rotation);
+            var scaled = Vector3.one * planeDensity;
+            var pivot = Vector3.Scale(scaled, surface.InverseTransformPoint(planeRef.TransformPoint(planeRegion.center)));
+            var shift = new Vector3(pivot.x, pivot.y, 0f) - turn * pivot;
+
+            if (surface.rotation == turn && surface.localScale == scaled && shift == unturn) return;
+            unturn = shift;
+            surface.localScale = scaled;
+            surface.SetPositionAndRotation(SlotPosition + unturn + batchShift, turn);
+        }
+
+        /// <summary>Hands the composite the plane, in the element's own space, to warp the capture onto.</summary>
+        void Warp()
+        {
+            if (!warp) warp = composite.gameObject.AddComponent<PlaneWarp>();
+
+            warp.Set(planePoint, planeS, planeT, planeRegion, planePolygon, OriginPoint(self.rect), perspective);
+        }
+
+        /// <summary>The element moved or turned and nothing inside it changed, so the capture
+        /// stands: only the composite, and the camera raycasts are cast through, follow it.</summary>
+        void Place()
+        {
+            if (!composite.enabled) return;
+            PlaceComposite(placedMargins);
+            captureCentre = self.TransformPoint(captureLocalCentre);
+            offscreenCamera.transform.SetPositionAndRotation(
+                self.TransformPoint(cameraLocalPosition), self.rotation * cameraLocalRotation);
+        }
+
+        /// <summary>Whether this capture can share a render. A <c>perspective</c> over anything but one
+        /// flat plane wants a frustum of its own, a rotation the surface could not cancel wants the camera turned with it, and a
+        /// reader inside wants the camera to render the subtree again with part of it hidden.</summary>
+        bool Batchable()
+        {
+            if (!FilterBatch.Enabled) return false;
+            if (!flat && (perspective > 0 || self.rotation != Quaternion.identity)) return false;
+            return !HasInnerReaders();
+        }
+
+        bool HasInnerReaders()
+        {
+            if (!BackdropSurface.Required) return false;
+            var surface = component?.Context?.ExistingBackdropSurface;
+            if (!surface) return false;
+            surface.CollectFor(this, innerReaders);
+            return innerReaders.Count > 0;
+        }
+
+        /// <summary>
+        /// Offers the capture to the batch, with a cell big enough to hold whatever the subtree
+        /// draws outside the element. Each filter's own camera used to crop that away for nothing;
+        /// packed together it would land on a neighbour, so the cell carries it and only the capture
+        /// region is copied back out.
+        /// </summary>
+        bool TryPack(float halfW, float halfH, float scale, Vector4 margins, float width, float height)
+        {
+            var minX = captureCentre.x - halfW;
+            var maxX = captureCentre.x + halfW;
+            var minY = captureCentre.y - halfH;
+            var maxY = captureCentre.y + halfH;
+
+            for (int i = 0; i < subtreeGraphics && i < graphics.Count; i++)
+            {
+                var g = graphics[i];
+                if (!g || !g.isActiveAndEnabled) continue;
+
+                g.rectTransform.GetWorldCorners(cornerBuffer);
+                for (int c = 0; c < 4; c++)
+                {
+                    var pt = cornerBuffer[c];
+                    if (pt.x < minX) minX = pt.x;
+                    if (pt.x > maxX) maxX = pt.x;
+                    if (pt.y < minY) minY = pt.y;
+                    if (pt.y > maxY) maxY = pt.y;
+                }
+            }
+
+            // Whole pixels on every side, so the capture sits on the atlas's own grid exactly as
+            // it sat on a texture of its own -- half a pixel of drift here moves 2.75% of glyph
+            // pixels, which is the shimmer the capture size is rounded to avoid in the first place.
+            var padLeft = Mathf.CeilToInt((captureCentre.x - halfW - minX) * scale);
+            var padRight = Mathf.CeilToInt((maxX - captureCentre.x - halfW) * scale);
+            var padBottom = Mathf.CeilToInt((captureCentre.y - halfH - minY) * scale);
+            var padTop = Mathf.CeilToInt((maxY - captureCentre.y - halfH) * scale);
+
+            var cell = new Vector2Int(padLeft + capturePxWidth + padRight, padBottom + capturePxHeight + padTop);
+
+            FilterBatch.Enqueue(this, NestingDepth(), new Vector2Int(capturePxWidth, capturePxHeight),
+                cell, new Vector2Int(padLeft, padBottom), margins, width, height);
+            return true;
+        }
+
+        /// <summary>How many filters this one sits inside, counted from the composite because that is
+        /// what stayed in the page -- the subtree itself went offscreen. Each outer filter's subtree
+        /// is on a surface of its own too, so the walk carries on from that filter's composite; up
+        /// the transforms alone it stops at the first surface, and an inner filter came out level
+        /// with its outer one and was captured after it as often as not.</summary>
+        int NestingDepth()
+        {
+            var depth = 0;
+            for (var t = composite ? composite.transform.parent : null; t && depth < 64;)
+            {
+                var outer = t.GetComponentInParent<ElementFilter>();
+                if (!outer || !outer.composite) break;
+                depth++;
+                t = outer.composite.transform.parent;
+            }
+            return depth;
+        }
+
+        internal RenderTexture CaptureTarget => target;
+        internal float CaptureScale => ScaleFactor;
+        internal int CaptureLayerMask => offscreenCamera ? offscreenCamera.cullingMask : 0;
+
+        /// <summary>Slides the surface so the capture is framed at <paramref name="centre"/>, which
+        /// is the cell the batch gave it. The camera rides along, for the raycaster's sake.</summary>
+        internal void MoveCaptureTo(Vector3 centre)
+        {
+            // Moving the surface marks the subtree as moved, and the poll reads exactly that to know
+            // it did. So what each flag was is kept and put back below, rather than cleared into a
+            // missed frame for anything that moved the element after its own poll ran.
+            batchChanged.Clear();
+            batchChanged.Add(self.hasChanged);
+            for (int i = 0; i < subtreeGraphics && i < graphics.Count; i++)
+                batchChanged.Add(graphics[i] && graphics[i].transform.hasChanged);
+
+            // Set rather than offset, so a surface moved twice cannot end up anywhere but here.
+            batchShift = centre - captureCentre;
+            offscreenCanvas.transform.position = SlotPosition + unturn + batchShift;
+            offscreenCamera.transform.SetPositionAndRotation(centre - captureRotation * Vector3.forward * 100f, captureRotation);
+        }
+
+        /// <summary>
+        /// Puts the surface back in its own slot. It has to go back every frame: the slots are what
+        /// keep one surface out of another's camera, and on the shared plane a filter rendering
+        /// alone would otherwise find its neighbours in frame.
+        /// </summary>
+        internal void RestoreSlot()
+        {
+            if (batchShift == Vector3.zero) return;
+
+            offscreenCanvas.transform.position = SlotPosition + unturn;
+            offscreenCamera.transform.SetPositionAndRotation(captureCentre - captureRotation * Vector3.forward * 100f, captureRotation);
+            batchShift = Vector3.zero;
+
+            if (batchChanged.Count == 0) return;
+
+            self.hasChanged = batchChanged[0];
+            for (int i = 0; i < subtreeGraphics && i < graphics.Count && i + 1 < batchChanged.Count; i++)
+                if (graphics[i]) graphics[i].transform.hasChanged = batchChanged[i + 1];
+            batchChanged.Clear();
+        }
+
+        /// <summary>The capture on a camera of its own, for anything the batch cannot take.</summary>
+        internal void CaptureAlone(Vector4 margins, float width, float height)
+        {
+            // Anything blending inside this capture blends with the capture, not with the screen --
+            // which is what makes `isolation: isolate` contain a blend, and what built-in gets from
+            // a GrabPass copying whatever target is current. Taken now, with the camera already
+            // framed, so each reader's backdrop is the same view its own draw will land in.
+            RenderInnerBackdrops(capturePxWidth, capturePxHeight);
+
+            offscreenCamera.targetTexture = target;
+            using (ReactUnity.Helpers.ReactProfiling.FilterCapture.Auto()) offscreenCamera.Render();
+
+            CompleteCapture(margins, width, height);
+        }
+
+        /// <summary>Everything the chain does to a capture once it exists, whoever took it.</summary>
+        internal void CompleteCapture(Vector4 margins, float width, float height)
+        {
+            // The composite has not moved and nothing about it rebuilt, but the texture it draws
+            // holds different pixels -- which the page's backdrops, and any filter this one is
+            // nested in, have to be told about.
+            component.Context.ExistingBackdropSurface?.NoteRepaint(composite);
+            var outer = composite.transform.parent ? composite.transform.parent.GetComponentInParent<ElementFilter>() : null;
+            if (outer && outer != this) outer.NoteInnerCapture(composite);
+
+            var hasShadow = definition.DropShadowColor.a > 0;
+
+            using (ReactUnity.Helpers.ReactProfiling.FilterBlur.Auto())
+            {
+                if (definition.Blur > 0) Blur(target, target, definition.Blur, width, height);
+
+                if (hasShadow)
+                {
+                    // Cast from the element after its own blur, so a blurred element throws a blurred
+                    // shadow -- the order `blur() drop-shadow()` gives on the web. Only alpha is read
+                    // back out, so the colour the silhouette carries does not matter.
+                    if (definition.DropShadowBlur > 0) Blur(target, shadow, definition.DropShadowBlur, width, height);
+                    else Graphics.Blit(target, shadow);
+                }
+            }
+
+            using (ReactUnity.Helpers.ReactProfiling.FilterMask.Auto())
+                RenderMask(capturePxWidth, capturePxHeight, width, height, margins);
+            using (ReactUnity.Helpers.ReactProfiling.FilterComposite.Auto())
+                ApplyToComposite(target, margins, width, height);
+
+            // A batched capture lands after the element's own LateUpdate has already pushed, so what
+            // ApplyToComposite worked out here goes out now or it is drawn with a frame late.
+            PushUniforms();
+        }
+
+        /// <summary>
+        /// Aims the camera as a <c>perspective</c> asks: the viewer's own distance in front of the
+        /// element's plane, standing over the point <c>perspective-origin</c> names.
+        /// </summary>
+        /// <remarks>
+        /// The frame is off-axis whenever that point is not the capture's centre, so the projection
+        /// is built by hand rather than from a field of view -- a symmetric frustum would put the
+        /// vanishing point back in the middle, which is the one thing perspective-origin moves.
+        /// Distances are world units and still match CSS's, because the element's own scale reaches
+        /// the subtree's x and y but never its z: both sides of the divide are scaled alike.
+        /// </remarks>
+        void FrameProjected(Rect rect, Vector3 worldCentre, float halfW, float halfH)
+        {
+            var originWorld = self.TransformPoint(OriginPoint(rect));
+
+            offscreenCamera.orthographic = false;
+            offscreenCamera.transform.SetPositionAndRotation(originWorld - self.forward * perspective, self.rotation);
+
+            // How far off the camera's axis the capture sits, measured on the element's own plane.
+            var delta = worldCentre - originWorld;
+            var dx = Vector3.Dot(delta, self.right);
+            var dy = Vector3.Dot(delta, self.up);
+
+            // Clipped to the slab the subtree actually occupies, which leaves a band tight around the
+            // element's own plane however far back the eye stands -- nothing before `near` is drawn,
+            // so a distant camera does not reach into the slot it happens to be standing in. Capping
+            // the band at one slot's stride is what keeps it out of the next one. The near/far ratio
+            // this leaves is also what keeps the depth buffer exact across it.
+            var near = Mathf.Max(perspective * MinProjectionW, projectedNear);
+            var far = Mathf.Clamp(projectedFar, near + ProjectionSlack, near + SlotStride);
+            offscreenCamera.nearClipPlane = near;
+            offscreenCamera.farClipPlane = far;
+
+            // The frustum is given at the near plane; everything above is on the element's plane,
+            // one similar triangle away.
+            var k = near / perspective;
+            offscreenCamera.projectionMatrix = Matrix4x4.Frustum(
+                (dx - halfW) * k, (dx + halfW) * k,
+                (dy - halfH) * k, (dy + halfH) * k,
+                near, far);
+        }
+
+        /// <summary>
+        /// Grows the capture region to hold whatever the projection throws outside the element's own
+        /// box, and records how near and far the subtree reaches so the camera can be clipped to it.
+        /// </summary>
+        /// <remarks>
+        /// Every descendant corner is projected rather than the subtree's flat bounds: a rotation
+        /// leaves the four corners of one child at four different depths, so a box taken before the
+        /// divide would come out the wrong size on all four sides.
+        /// </remarks>
+        void MeasureProjection(Rect rect, ref float mLeft, ref float mRight, ref float mBottom, ref float mTop)
+        {
+            projected.Clear();
+            self.GetComponentsInChildren(true, projected);
+
+            var origin = OriginPoint(rect);
+            var min = rect.min;
+            var max = rect.max;
+
+            // Seeded on the element's own plane, which is where it sits whatever its subtree does.
+            var nearest = 0f;
+            var furthest = 0f;
+
+            for (int i = 0; i < projected.Count; i++)
+            {
+                var child = projected[i];
+                if (child == self) continue;
+
+                child.GetWorldCorners(cornerBuffer);
+                for (int c = 0; c < 4; c++)
+                {
+                    // Depth off the element's plane, where the camera stands, from local values: a
+                    // flat plane's surface is scaled up for its capture, and world units with it.
+                    var local = self.InverseTransformPoint(cornerBuffer[c]);
+                    var depth = Depth(local);
+                    if (depth < nearest) nearest = depth;
+                    if (depth > furthest) furthest = depth;
+
+                    // A canvas grows z away from the viewer, so nearer is negative and the divisor
+                    // shrinks -- which is the magnification something leaning towards us picks up.
+                    var w = 1f + depth / perspective;
+                    if (w < MinProjectionW) continue;
+
+                    var point = new Vector2(
+                        origin.x + (local.x - origin.x) / w,
+                        origin.y + (local.y - origin.y) / w);
+                    min = Vector2.Min(min, point);
+                    max = Vector2.Max(max, point);
+                }
+            }
+
+            projectedNear = perspective + nearest - ProjectionSlack;
+            projectedFar = perspective + furthest + ProjectionSlack;
+
+            mLeft = Grow(mLeft, rect.xMin - min.x);
+            mRight = Grow(mRight, max.x - rect.xMax);
+            mBottom = Grow(mBottom, rect.yMin - min.y);
+            mTop = Grow(mTop, max.y - rect.yMax);
+        }
+
+        static float Grow(float margin, float wanted)
+        {
+            if (wanted <= margin) return margin;
+
+            var stepped = Mathf.Ceil(wanted / ProjectionBleedStep) * ProjectionBleedStep;
+            return Mathf.Min(stepped, Mathf.Max(margin, MaxProjectionBleed));
+        }
+
+        /// <summary><c>perspective-origin</c> as a point in the element's own rect, y measured from
+        /// the top as CSS measures it.</summary>
+        Vector2 OriginPoint(Rect rect)
+        {
+            return new Vector2(
+                rect.xMin + Offset(perspectiveOrigin.X, rect.width),
+                rect.yMax - Offset(perspectiveOrigin.Y, rect.height));
+        }
+
+        static float Offset(YogaValue value, float size) =>
+            value.Unit == YogaUnit.Percent ? size * value.Value / 100f :
+            value.Unit == YogaUnit.Point ? value.Value : size / 2f;
+
+        /// <summary>
+        /// Gives every element that reads a backdrop from inside this capture the capture as it
+        /// stands behind it. Nothing to do on built-in, whose GrabPass already grabs this target.
+        /// </summary>
+        void RenderInnerBackdrops(int pxWidth, int pxHeight)
+        {
+            if (!BackdropSurface.Required) return;
+
+            // Asked for rather than made: a filter with nothing blending inside it -- which is most
+            // of them -- has no reason to put a register in the scene, least of all while the
+            // context is being torn down around it.
+            var surface = component.Context.ExistingBackdropSurface;
+            if (!surface) return;
+
+            surface.CollectFor(this, innerReaders);
+            if (innerReaders.Count == 0)
+            {
+                innerBackdrops.Release();
+                innerWatch?.Reset();
+                return;
+            }
+
+            // Watched the way the page is, so a reader keeps its surface unless something changed
+            // under its own rect -- a surface usually has one corner animating. Framed on the target
+            // first, which is the viewport the rects and the blur's reach are measured in.
+            innerWatch ??= new BackdropWatch();
+            var previous = offscreenCamera.targetTexture;
+            offscreenCamera.targetTexture = target;
+            innerWatch.Poll(offscreenCanvas.transform, offscreenCamera, false);
+            innerWatch.IndexReaders(innerReaders, innerIndices);
+
+            innerStale.Clear();
+            for (int i = 0; i < innerReaders.Count; i++)
+                innerStale.Add(!BackdropSurface.CacheEnabled ||
+                    innerWatch.Stale(innerIndices[i], innerWatch.ReaderRect(offscreenCamera, innerReaders[i])));
+            offscreenCamera.targetTexture = previous;
+
+            using (ReactUnity.Helpers.ReactProfiling.FilterInnerBackdrops.Auto())
+                innerBackdrops.Render(offscreenCamera, offscreenCanvas.transform, innerReaders, pxWidth, pxHeight, innerStale);
+        }
+
+        /// <summary>
+        /// Separable Gaussian of `radius` local units, from one texture into another through the
+        /// scratch buffer. Blurring in place is fine -- the horizontal half always lands elsewhere.
+        /// </summary>
+        void Blur(RenderTexture from, RenderTexture to, float radius, float width, float height)
+        {
+            // Nine taps whose spacing grows with the radius sample too sparsely for a wide blur and
+            // band. Convolving the same kernel n times widens it by sqrt(n) instead, which keeps
+            // the taps close together however large the radius gets.
+            var passes = Mathf.Clamp(Mathf.CeilToInt(radius / 6f), 1, 4);
+            var each = radius / Mathf.Sqrt(passes);
+
+            // Texels per local unit, read off the target that was actually allocated -- so this
+            // carries the element's own scale, and a clamped dimension narrows the blur with it.
+            var hRadius = each * to.width / width;
+            var vRadius = each * to.height / height;
+
+            var src = from;
+            for (int i = 0; i < passes; i++)
+            {
+                blurMaterial.SetFloat(BlurId, hRadius);
+                Graphics.Blit(src, scratch, blurMaterial, 0);
+                blurMaterial.SetFloat(BlurId, vRadius);
+                Graphics.Blit(scratch, to, blurMaterial, 1);
+                src = to;
+            }
+        }
+
+        void EnsureTarget(int w, int h, bool needShadow)
+        {
+            if (!target || target.width != w || target.height != h)
+            {
+                Release(ref target);
+                Release(ref scratch);
+                target = Allocate(w, h, 24);
+                scratch = Allocate(w, h, 0);
+            }
+
+            if (!needShadow) Release(ref shadow);
+            else if (!shadow || shadow.width != w || shadow.height != h)
+            {
+                Release(ref shadow);
+                shadow = Allocate(w, h, 0);
+            }
+        }
+
+        static RenderTexture Allocate(int w, int h, int depth)
+        {
+            var rt = new RenderTexture(w, h, depth, RenderTextureFormat.ARGB32);
+            rt.filterMode = FilterMode.Bilinear;
+            rt.wrapMode = TextureWrapMode.Clamp;
+            rt.Create();
+            return rt;
+        }
+
+        void ApplyToComposite(RenderTexture source, Vector4 margins, float width, float height)
+        {
+            var rect = self.rect;
+            float mLeft = margins.x, mBottom = margins.z;
+
+            PlaceComposite(margins);
+
+            composite.texture = source;
+            composite.enabled = true;
+
+            // The shader subtracts this from its uv, and the rect's y grows the other way.
+            shadowOffsetUv = new Vector4(definition.DropShadowOffset.x / width, -definition.DropShadowOffset.y / height, 0, 0);
+
+            // Kept rather than the values themselves, so a scanline period or an aberration that
+            // moves without changing the capture still converts against the frame it is drawn in.
+            texelsPerUnitY = height > 0 ? source.height / height : 1f;
+            uvPerUnitX = width > 0 ? 1f / width : 0f;
+
+            // How the shader gets from the capture's uv back to the element's own box, which is the
+            // space `clip-path` was resolved in.
+            clipRegion = new Vector4(width, height, mLeft, mBottom);
+
+            // And how the raycast filter gets there, which is the same trip in points.
+            clipFilter.BoxSize = rect.size;
+            clipFilter.BoxOffset = new Vector2(mLeft, mBottom);
+        }
+
+        /// <summary>Puts the composite where the element stands, grown by the filter region.</summary>
+        void PlaceComposite(Vector4 margins)
+        {
+            placedMargins = margins;
+            var rect = self.rect;
+            var compRect = composite.transform as RectTransform;
+            float mLeft = margins.x, mRight = margins.y, mBottom = margins.z, mTop = margins.w;
+
+            // Match the element's slot, grown by the filter region so nothing is cut off at the edge.
+            compRect.anchorMin = self.anchorMin;
+            compRect.anchorMax = self.anchorMax;
+            compRect.sizeDelta = self.sizeDelta + new Vector2(mLeft + mRight, mBottom + mTop);
+
+            // Keep the pivot on the same point despite the wider rect: it is the origin the rotation
+            // and scale below turn about, and `transform-origin` has already moved it off centre.
+            var grown = rect.size + new Vector2(mLeft + mRight, mBottom + mTop);
+            compRect.pivot = new Vector2(
+                grown.x > 0 ? (self.pivot.x * rect.width + mLeft) / grown.x : 0.5f,
+                grown.y > 0 ? (self.pivot.y * rect.height + mBottom) / grown.y : 0.5f);
+            compRect.anchoredPosition = self.anchoredPosition;
+
+            // The capture left these out, so they apply to the filtered image here.
+            compRect.localRotation = self.localRotation;
+            compRect.localScale = self.localScale;
+        }
+
+        /// <summary>Writes the whole filter chain onto one material. Called for the composite's own
+        /// material and again for the stencil copy UGUI draws in its place under a mask.</summary>
+        void SetUniforms(Material m)
+        {
+            m.SetTexture(MainTexId, target);
+            m.SetInt(BlendModeId, (int) blendMode);
+            m.SetFloat(BrightnessId, definition.Brightness);
+            m.SetFloat(ContrastId, definition.Contrast);
+            m.SetFloat(GrayscaleId, definition.Grayscale);
+            m.SetFloat(HueRotateId, definition.HueRotate);
+            m.SetFloat(InvertId, definition.Invert);
+            m.SetFloat(OpacityId, definition.Opacity);
+            m.SetFloat(SaturateId, definition.Saturate);
+            m.SetFloat(GrainId, definition.Grain);
+            m.SetFloat(PixelateId, definition.Pixelate);
+            m.SetFloat(SepiaId, definition.Sepia);
+            m.SetFloat(GrainPhaseId, definition.GrainPhase);
+            m.SetFloat(PosterizeId, definition.Posterize);
+            m.SetFloat(ScanlineIntensityId, definition.ScanlineIntensity);
+            m.SetFloat(ScanlinePeriodId, definition.ScanlinePeriod * texelsPerUnitY);
+            m.SetFloat(ScanlinePhaseId, definition.ScanlinePhase * texelsPerUnitY);
+            m.SetColor(TintId, definition.Tint);
+            m.SetFloat(AberrationId, definition.ChromaticAberration * uvPerUnitX);
+
+            if (definition.DropShadowColor.a > 0 && shadow)
+            {
+                m.SetTexture(ShadowTexId, shadow);
+                m.SetColor(ShadowColorId, definition.DropShadowColor);
+                m.SetVector(ShadowOffsetId, shadowOffsetUv);
+            }
+            else m.SetColor(ShadowColorId, Color.clear);
+
+            var hasMask = maskTarget && maskLayers.Count > 0;
+            m.SetFloat(MaskEnabledId, hasMask ? 1f : 0f);
+            m.SetInt(MaskLuminanceId, maskLuminance ? 1 : 0);
+            if (hasMask) m.SetTexture(MaskTexId, maskTarget);
+
+            SetClipUniforms(m);
+        }
+
+        /// <summary>
+        /// The shape a <c>clip-path</c> resolved to, and how the shader is to read it. Two shapes
+        /// arrive as geometry the fragment shader evaluates itself -- a rounded box and an ellipse
+        /// are a couple of uniforms each -- and a third as a ring of points it walks.
+        /// </summary>
+        /// <remarks>
+        /// A flattened curve is none of those: the ring is a fixed-size uniform array walked with a
+        /// constant-bound loop, which is what keeps the walk inside a fragment shader's register
+        /// budget, and one <c>path()</c> segment can be sixty points on its own. Anything past that
+        /// budget is rasterized to a coverage mask here and sampled as a texture, so the shader's
+        /// cost stops growing with the shape's complexity at exactly the point the uniforms run out.
+        /// </remarks>
+        void PrepareClip()
+        {
+            var shape = clipShape ?? ClipPath.None;
+
+            clipKind = ClipKindNone;
+            if (shape.Kind == ClipPathKind.None)
+            {
+                ReleaseClipMask();
+                return;
+            }
+
+            resolvedClip = shape.Resolve(referenceBox);
+
+            switch (resolvedClip.Form)
+            {
+                case ClipShapeForm.RoundedBox:
+                    clipKind = ClipKindBox;
+                    break;
+
+                case ClipShapeForm.Ellipse:
+                    clipKind = ClipKindEllipse;
+                    break;
+
+                case ClipShapeForm.Contours:
+                {
+                    var ring = resolvedClip.Ring;
+                    if (ring != null && ring.Length - 1 <= ClipPath.MaxUniformPoints) clipKind = ClipKindRing;
+                    else if (EnsureClipMask()) clipKind = ClipKindMask;
+                    break;
+                }
+            }
+
+            // A shape that resolved to no geometry -- too few points to enclose anything -- leaves
+            // the element alone. Clipping it away entirely is not what a malformed value should do.
+            if (clipKind != ClipKindMask) ReleaseClipMask();
+        }
+
+        /// <summary>
+        /// Rasterizes the contours into a coverage texture over the same region the capture covers,
+        /// so the composite samples it with the uv it already has. Only redone when the shape or
+        /// that region moves -- flattening and rasterizing are frame-time work, not per-frame work.
+        /// </summary>
+        bool EnsureClipMask()
+        {
+            // Nothing to line the mask up with until the first capture has been taken.
+            if (!target) return false;
+
+            var width = Mathf.Clamp(target.width, 1, MaxMaskDimension);
+            var height = Mathf.Clamp(target.height, 1, MaxMaskDimension);
+
+            if (clipMask && clipMask.width == width && clipMask.height == height &&
+                ReferenceEquals(clipMaskKey, resolvedClip.Contours) && clipMaskRegion == clipRegion) return true;
+
+            if (clipRegion.x <= 0 || clipRegion.y <= 0) return false;
+
+            var scale = new Vector2(width / clipRegion.x, height / clipRegion.y);
+            var offset = new Vector2(clipRegion.z, clipRegion.w);
+            var coverage = ClipPathGeometry.Rasterize(resolvedClip.Contours, resolvedClip.EvenOdd, width, height, scale, offset);
+
+            if (!clipMask || clipMask.width != width || clipMask.height != height)
+            {
+                ReleaseClipMask();
+                // Linear, and one channel: this is coverage rather than colour, so a gamma ramp
+                // applied on the way in would bend the antialiased edge.
+                clipMask = new Texture2D(width, height, TextureFormat.R8, false, true)
+                {
+                    filterMode = FilterMode.Bilinear,
+                    wrapMode = TextureWrapMode.Clamp,
+                };
+            }
+
+            clipMask.LoadRawTextureData(coverage);
+            clipMask.Apply(false);
+
+            clipMaskKey = resolvedClip.Contours;
+            clipMaskRegion = clipRegion;
+            return true;
+        }
+
+        void ReleaseClipMask()
+        {
+            if (clipMask) Destroy(clipMask);
+            clipMask = null;
+            clipMaskKey = null;
+        }
+
+        /// <summary>
+        /// The prepared shape, in the border box's own points. Kind 0 is written whenever there is
+        /// nothing to clip, which the shader takes as its identity -- an element that only isolated
+        /// or only blends has to come back out of the capture as the pixels that went in.
+        /// </summary>
+        void SetClipUniforms(Material m)
+        {
+            m.SetInt(ClipKindId, clipKind);
+            if (clipKind == ClipKindNone) return;
+
+            m.SetVector(ClipRegionId, clipRegion);
+
+            switch (clipKind)
+            {
+                case ClipKindBox:
+                    m.SetVector(ClipBoxId, new Vector4(resolvedClip.Box.xMin, resolvedClip.Box.yMin, resolvedClip.Box.xMax, resolvedClip.Box.yMax));
+                    m.SetVector(ClipRadiiXId, resolvedClip.RadiiX);
+                    m.SetVector(ClipRadiiYId, resolvedClip.RadiiY);
+                    break;
+
+                case ClipKindEllipse:
+                    m.SetVector(ClipCircleId, new Vector4(resolvedClip.Center.x, resolvedClip.Center.y, resolvedClip.Radius.x, resolvedClip.Radius.y));
+                    break;
+
+                case ClipKindMask:
+                    m.SetTexture(ClipMaskTexId, clipMask);
+                    break;
+
+                default:
+                {
+                    var ring = resolvedClip.Ring;
+                    for (int i = 0; i < clipPolyBuffer.Length; i++)
+                    {
+                        var a = 2 * i < ring.Length ? ring[2 * i] : Vector2.zero;
+                        var b = 2 * i + 1 < ring.Length ? ring[2 * i + 1] : Vector2.zero;
+                        clipPolyBuffer[i] = new Vector4(a.x, a.y, b.x, b.y);
+                    }
+
+                    m.SetVectorArray(ClipPolyId, clipPolyBuffer);
+                    m.SetInt(ClipPolyCountId, ring.Length);
+                    m.SetInt(ClipEvenOddId, resolvedClip.EvenOdd ? 1 : 0);
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// The box the shape is measured against, in the border box's own coordinates -- so the
+        /// border box is the rect at the origin, a padding or content box sits inside it, and a
+        /// margin box reaches past it.
+        /// </summary>
+        /// <remarks>
+        /// Read off the Yoga node rather than the element's own style, which is where the used
+        /// values are: a percentage padding has already been resolved against the parent by the
+        /// time layout is done, and a border width can have been rounded to fit.
+        /// </remarks>
+        internal static Rect ReferenceBox(Rect rect, ClipPath shape, YogaNode layout)
+        {
+            var box = new Rect(0, 0, rect.width, rect.height);
+
+            if (shape == null || shape.Box == ClipGeometryBox.BorderBox) return box;
+            if (layout == null) return box;
+
+            float left, right, top, bottom;
+
+            if (shape.Box == ClipGeometryBox.MarginBox)
+            {
+                // Outwards: the margin box is the only one of the four bigger than the element.
+                left = -Norm(layout.LayoutMarginLeft);
+                right = -Norm(layout.LayoutMarginRight);
+                top = -Norm(layout.LayoutMarginTop);
+                bottom = -Norm(layout.LayoutMarginBottom);
+            }
+            else
+            {
+                left = Norm(layout.LayoutBorderLeft);
+                right = Norm(layout.LayoutBorderRight);
+                top = Norm(layout.LayoutBorderTop);
+                bottom = Norm(layout.LayoutBorderBottom);
+
+                if (shape.Box == ClipGeometryBox.ContentBox)
+                {
+                    left += Norm(layout.LayoutPaddingLeft);
+                    right += Norm(layout.LayoutPaddingRight);
+                    top += Norm(layout.LayoutPaddingTop);
+                    bottom += Norm(layout.LayoutPaddingBottom);
+                }
+            }
+
+            // CSS's `top` is the box's upper edge, where y grows the other way here.
+            var minX = box.xMin + left;
+            var maxX = box.xMax - right;
+            var minY = box.yMin + bottom;
+            var maxY = box.yMax - top;
+
+            return Rect.MinMaxRect(minX, minY, Mathf.Max(minX, maxX), Mathf.Max(minY, maxY));
+        }
+
+        /// <summary>Yoga reports an undefined edge as NaN, which would take the whole box with it.</summary>
+        static float Norm(float value) => float.IsNaN(value) ? 0f : value;
+    }
+}

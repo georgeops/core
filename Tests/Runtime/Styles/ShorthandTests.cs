@@ -1,0 +1,250 @@
+﻿using System.Collections;
+using Yoga;
+using NUnit.Framework;
+using ReactUnity.Scripting;
+using ReactUnity.Styling;
+using ReactUnity.Types;
+using TMPro;
+using UnityEngine;
+
+namespace ReactUnity.Tests
+{
+    public class ShorthandTests : TestBase
+    {
+        public ShorthandTests(JavascriptEngineType engineType) : base(engineType) { }
+
+        [UGUITest(Style = @"
+          #test {
+            top: 11px;
+            inset: 33px 0 0 21px;
+            left: 23px;
+
+            margin-top: 26px;
+            margin: 20px;
+            margin-left: 72px;
+
+            padding-left: 55px;
+            padding: 30px;
+            padding-top: 42px;
+          }
+")]
+        public IEnumerator MarginAndPaddingAndInsetShorthand()
+        {
+            yield return null;
+
+            var cmp = Q("#test");
+            var text = cmp.Children[0] as UGUI.UGUIComponent;
+
+            var rt = cmp.GetBoundingClientRect();
+            var tt = text.GetBoundingClientRect();
+
+            Assert.AreEqual(95, rt.x, 1);
+            Assert.AreEqual(53, rt.y, 1);
+
+            Assert.AreEqual(125, tt.xMin, 1);
+            Assert.AreEqual(95, tt.yMin, 1);
+
+            cmp.Style["margin"] = "10px auto";
+            yield return null;
+            Assert.AreEqual(YogaValue.Point(10), cmp.ComputedStyle.GetStyleValue(LayoutProperties.MarginTop));
+            Assert.AreEqual(YogaValue.Point(10), cmp.ComputedStyle.GetStyleValue(LayoutProperties.MarginBottom));
+            Assert.AreEqual(YogaValue.Auto(), cmp.ComputedStyle.GetStyleValue(LayoutProperties.MarginLeft));
+            Assert.AreEqual(YogaValue.Auto(), cmp.ComputedStyle.GetStyleValue(LayoutProperties.MarginRight));
+
+            cmp.Style["margin"] = "auto";
+            yield return null;
+            Assert.AreEqual(YogaValue.Auto(), cmp.ComputedStyle.GetStyleValue(LayoutProperties.MarginTop));
+            Assert.AreEqual(YogaValue.Auto(), cmp.ComputedStyle.GetStyleValue(LayoutProperties.MarginBottom));
+            Assert.AreEqual(YogaValue.Auto(), cmp.ComputedStyle.GetStyleValue(LayoutProperties.MarginLeft));
+            Assert.AreEqual(YogaValue.Auto(), cmp.ComputedStyle.GetStyleValue(LayoutProperties.MarginRight));
+        }
+
+
+        [UGUITest(Style = @"
+          #test {
+            font: bold italic 23px /33px monospace;
+          }
+")]
+        public IEnumerator FontShorthand()
+        {
+            yield return null;
+
+            var cmp = Q("#test");
+            var text = cmp.Children[0] as UGUI.UGUIComponent;
+
+            var tt = text.RectTransform.GetComponentInChildren<TMPro.TextMeshProUGUI>();
+
+            Assert.AreEqual(FontStyles.Italic | FontStyles.Bold, tt.fontStyle);
+            Assert.AreEqual(FontWeight.Bold, tt.fontWeight);
+            Assert.AreEqual("monospace", tt.font.name);
+            Assert.AreEqual(23, tt.fontSize);
+            Assert.AreEqual(1.33f, tt.margin.y, 0.1f);
+            Assert.AreEqual(1.33f, tt.margin.w, 0.1f);
+            Assert.AreEqual(11.59f, tt.lineSpacing, 0.1f);
+        }
+
+        [UGUITest(Style = @"
+          #test {
+            background: red url(res:ReactUnity/tests/sprites/star);
+            background-blend-mode: color;
+            mask: url(res:ReactUnity/tests/sprites/star) space round 50px 60px / cover, url(res:ReactUnity/tests/sprites/star) repeat-y top right / 50% 50%;
+            background-repeat: space round, repeat-x, repeat-y, space, no-repeat;
+          }
+")]
+        public IEnumerator BackgroundAndMask()
+        {
+            yield return null;
+
+            var cmp = Q("#test");
+            var bg = cmp.BorderAndBackground;
+
+            Assert.AreEqual(typeof(Sprite), bg.BackgroundGraphics[0].sprite?.GetType());
+            Assert.AreEqual(Color.red, bg.BackgroundGraphics[0].color);
+            Assert.AreEqual(Color.red, bg.BgColor);
+
+
+            var maskImage = cmp.ComputedStyle.maskImage;
+            var maskPositionX = cmp.ComputedStyle.maskPositionX;
+            var maskPositionY = cmp.ComputedStyle.maskPositionY;
+            var maskSize = cmp.ComputedStyle.maskSize;
+            var maskRepeatX = cmp.ComputedStyle.maskRepeatX;
+            var maskRepeatY = cmp.ComputedStyle.maskRepeatY;
+            Assert.AreEqual(2, maskImage.Count);
+
+            Assert.AreEqual(YogaValue.Point(50), maskPositionX.Get(0));
+            Assert.AreEqual(YogaValue.Percent(100), maskPositionX.Get(1));
+            Assert.AreEqual(YogaValue.Point(60), maskPositionY.Get(0));
+            Assert.AreEqual(YogaValue.Percent(0), maskPositionY.Get(1));
+
+            Assert.AreEqual(BackgroundSize.Cover, maskSize.Get(0));
+            Assert.AreEqual(new BackgroundSize(new YogaValue2(YogaValue.Percent(50), YogaValue.Percent(50))), maskSize.Get(1));
+
+            Assert.AreEqual(BackgroundRepeat.Space, maskRepeatX.Get(0));
+            Assert.AreEqual(BackgroundRepeat.NoRepeat, maskRepeatX.Get(1));
+
+            Assert.AreEqual(BackgroundRepeat.Round, maskRepeatY.Get(0));
+            Assert.AreEqual(BackgroundRepeat.Repeat, maskRepeatY.Get(1));
+
+            var rptX = cmp.ComputedStyle.backgroundRepeatX;
+            var rptY = cmp.ComputedStyle.backgroundRepeatY;
+            Assert.AreEqual(5, rptX.Count);
+            Assert.AreEqual(5, rptY.Count);
+            Assert.AreEqual(BackgroundRepeat.Space, rptX.Get(0));
+            Assert.AreEqual(BackgroundRepeat.Repeat, rptX.Get(1));
+            Assert.AreEqual(BackgroundRepeat.NoRepeat, rptX.Get(2));
+            Assert.AreEqual(BackgroundRepeat.Space, rptX.Get(3));
+            Assert.AreEqual(BackgroundRepeat.NoRepeat, rptX.Get(4));
+
+            Assert.AreEqual(BackgroundRepeat.Round, rptY.Get(0));
+            Assert.AreEqual(BackgroundRepeat.NoRepeat, rptY.Get(1));
+            Assert.AreEqual(BackgroundRepeat.Repeat, rptY.Get(2));
+            Assert.AreEqual(BackgroundRepeat.Space, rptY.Get(3));
+            Assert.AreEqual(BackgroundRepeat.NoRepeat, rptY.Get(4));
+        }
+
+        [UGUITest(Style = @"
+          #test {
+            background:
+              linear-gradient(red, blue) text,
+              url(res:ReactUnity/tests/sprites/star) padding-box content-box,
+              url(res:ReactUnity/tests/sprites/star);
+          }
+")]
+        public IEnumerator BackgroundClipInTheShorthand()
+        {
+            yield return null;
+
+            var clip = Q("#test").ComputedStyle.backgroundClip;
+
+            Assert.AreEqual(3, clip.Count);
+            Assert.AreEqual(BackgroundBox.Text, clip.Get(0));
+            // Two boxes are origin then clip, and only the clip is kept.
+            Assert.AreEqual(BackgroundBox.ContentBox, clip.Get(1));
+            Assert.AreEqual(BackgroundBox.BorderBox, clip.Get(2), "a layer that names no box gets the initial value");
+        }
+
+        [UGUITest(Style = @"
+          #test {
+            background-clip: text;
+            background: red;
+          }
+")]
+        public IEnumerator TheBackgroundShorthandResetsTheClip()
+        {
+            yield return null;
+
+            Assert.AreEqual(BackgroundBox.BorderBox, Q("#test").ComputedStyle.backgroundClip.Get(0));
+        }
+
+
+        [UGUITest]
+        public IEnumerator TransformShorthand()
+        {
+
+            var cmp = Q("#test");
+
+
+            cmp.Style["transform"] = "translate(100px, 50px) translateX(20px) translateY(40px) translateZ(10px) translate3d(1px, 2px, 3px)"
+                + " scale(5) scale(2, 3) scale3d(2, 3, 4) scaleX(2) scaleY(3) scaleZ(4)"
+                + " rotate(40deg) rotate3d(0, 1, 0, 30deg) rotateX(20deg) rotateY(30deg) rotateZ(40deg)";
+            yield return null;
+
+            var translate = cmp.ComputedStyle.translate;
+            var translateZ = cmp.ComputedStyle.translateZ;
+            var rotate = cmp.ComputedStyle.rotate;
+            var scale = cmp.ComputedStyle.scale;
+
+            Assert.AreEqual(121, translate.X.Value);
+            Assert.AreEqual(92, translate.Y.Value);
+            Assert.AreEqual(13, translateZ.Value);
+
+            Assert.AreEqual(new Vector3(40, 135, 16), scale);
+
+            var expectedRotation = Quaternion.identity * Quaternion.Euler(0, 0, 40) * Quaternion.AngleAxis(30, Vector3.up) *
+                Quaternion.Euler(20, 0, 0) * Quaternion.Euler(0, 30, 0) * Quaternion.Euler(0, 0, 40);
+            Assert.AreEqual(expectedRotation.eulerAngles, rotate);
+        }
+
+        // The space between two calls is optional in CSS, and every minifier drops it -- so a built
+        // stylesheet arrives with the calls run together and has to parse the same way.
+        [UGUITest]
+        public IEnumerator TransformCallsNeedNoSpaceBetweenThem()
+        {
+            var cmp = Q("#test");
+
+            cmp.Style["transform"] = "rotateX(35deg)rotateY(-30deg)translateX(12px)scale(2)";
+            yield return null;
+
+            var expected = Quaternion.Euler(35, 0, 0) * Quaternion.Euler(0, -30, 0);
+            Assert.AreEqual(expected.eulerAngles, cmp.ComputedStyle.rotate);
+            Assert.AreEqual(12, cmp.ComputedStyle.translate.X.Value);
+            Assert.AreEqual(new Vector3(2, 2, 1), cmp.ComputedStyle.scale);
+        }
+
+        // The shorthand reads its own lengths, so a unit on one used to work only there. These are the
+        // longhands Tailwind writes: `outline` compiles to outline-style and outline-width, never both.
+        [UGUITest]
+        public IEnumerator OutlineLengthsTakeUnits()
+        {
+            var cmp = Q("#test");
+
+            cmp.Style["outline"] = "2px solid red";
+            yield return null;
+            Assert.AreEqual(2, cmp.ComputedStyle.outlineWidth);
+            Assert.AreEqual(Color.red, cmp.ComputedStyle.outlineColor);
+
+            cmp.Style["outline-width"] = "3px";
+            cmp.Style["outline-offset"] = "0.5cm";
+            yield return null;
+            Assert.AreEqual(3, cmp.ComputedStyle.outlineWidth);
+            Assert.AreEqual(18.9f, cmp.ComputedStyle.outlineOffset, 0.01f);
+
+            // A length is still a length when it is computed, and a bare number is still pixels.
+            cmp.Style["outline-width"] = "calc(2px * 2 + 1px)";
+            cmp.Style["outline-offset"] = "4";
+            yield return null;
+            Assert.AreEqual(5, cmp.ComputedStyle.outlineWidth);
+            Assert.AreEqual(4, cmp.ComputedStyle.outlineOffset);
+        }
+    }
+}

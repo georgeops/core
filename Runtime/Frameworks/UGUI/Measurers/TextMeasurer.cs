@@ -1,0 +1,97 @@
+using System;
+using System.Text;
+using Yoga;
+using TMPro;
+using UnityEngine;
+
+namespace ReactUnity.UGUI.Measurers
+{
+    public class TextMeasurer : MonoBehaviour, Behaviours.ITicked
+    {
+        private TextMeshProUGUI tmpro;
+        // The glyphs live on a child of the element, not on the object this measurer is on.
+        public TextMeshProUGUI Text
+        {
+            get => tmpro ? tmpro : (tmpro = GetComponentInChildren<TextMeshProUGUI>());
+            set => tmpro = value;
+        }
+
+        [NonSerialized] public YogaNode Layout;
+        [NonSerialized] public UGUIContext Context;
+
+        private float preferredWidth = 0;
+        private float preferredHeight = 0;
+
+        int Behaviours.ITicked.TickIndex { get; set; } = -1;
+
+        void Start()
+        {
+            if (Layout == null) enabled = false;
+        }
+
+        void OnEnable() => Behaviours.TextMeasurerTicker.Group.Add(this);
+
+        void OnDisable() => Behaviours.TextMeasurerTicker.Group.Remove(this);
+
+        // Its Update, called by TextMeasurerTicker.
+        void Behaviours.ITicked.Tick()
+        {
+            // Ticked from OnEnable on, which can be before the glyph child exists.
+            var text = Text;
+            if (!text) return;
+            var nw = text.preferredWidth;
+            var nh = text.preferredHeight;
+
+            if (preferredWidth != nw || preferredHeight != nh)
+            {
+                preferredWidth = nw;
+                preferredHeight = nh;
+                Layout?.MarkDirty();
+            }
+        }
+
+        public YogaSize Measure(YogaNode node, float width, YogaMeasureMode widthMode, float height, YogaMeasureMode heightMode)
+        {
+            var values = Vector2.zero;
+            var valuesFound = false;
+
+            var maxLines = Text.maxVisibleLines;
+            if (maxLines < Int16.MaxValue)
+            {
+                var ti = Text.GetTextInfo(Text.text);
+                if (ti.lineCount > maxLines)
+                {
+                    maxLines--;
+
+                    var txt = new StringBuilder();
+
+                    var ci = ti.characterInfo;
+                    var len = ci.Length;
+
+                    if (ci[len - 1].lineNumber > maxLines)
+                    {
+                        for (int i = 0; i < len; i++)
+                        {
+                            var c = ci[i];
+                            if (c.lineNumber > maxLines) break;
+                            txt.Append(ci[i].character);
+                        }
+                        values = Text.GetPreferredValues(txt.ToString(), width, height);
+                        valuesFound = true;
+                    }
+                }
+            }
+
+            if (!valuesFound)
+            {
+                values = Text.GetPreferredValues(width, height);
+            }
+
+            return new YogaSize
+            {
+                width = Mathf.Ceil(values.x),
+                height = Mathf.Ceil(values.y),
+            };
+        }
+    }
+}

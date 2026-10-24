@@ -1,0 +1,99 @@
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using ReactUnity.Styling.Computed;
+using ReactUnity.Styling.Converters;
+
+namespace ReactUnity.Styling.Shorthands
+{
+    internal abstract class StyleShorthand : IStyleKey
+    {
+        public string Name { get; }
+        public abstract List<IStyleProperty> ModifiedProperties { get; }
+
+        public StyleShorthand(string name)
+        {
+            Name = name;
+        }
+
+        public List<IStyleProperty> ClearValues(IDictionary<IStyleProperty, object> collection)
+        {
+            var count = ModifiedProperties.Count;
+            for (int i = 0; i < count; i++)
+                collection.Remove(ModifiedProperties[i]);
+            return ModifiedProperties;
+        }
+
+        public List<IStyleProperty> SetAllValues(IDictionary<IStyleProperty, object> collection, object value)
+        {
+            var count = ModifiedProperties.Count;
+            for (int i = 0; i < count; i++)
+                collection[ModifiedProperties[i]] = value;
+            return ModifiedProperties;
+        }
+
+        public List<IStyleProperty> SetAllValuesDefault(IDictionary<IStyleProperty, object> collection)
+        {
+            var count = ModifiedProperties.Count;
+            for (int i = 0; i < count; i++)
+            {
+                var prop = ModifiedProperties[i];
+                collection[prop] = prop.defaultValue;
+            }
+            return ModifiedProperties;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public virtual bool CanHandleKeyword(CssKeyword keyword) => false;
+
+        public virtual List<IStyleProperty> Modify(IDictionary<IStyleProperty, object> collection, object value)
+        {
+            if (value == null) return ClearValues(collection);
+
+            var keyword = CssKeyword.NoKeyword;
+
+            if (value is string s)
+            {
+                if (ParserHelpers.TryParseVariables(s, out var variable))
+                    return SetAllValues(collection, new ComputedShorthandVariable(variable, this));
+
+                ParserHelpers.TryParseKeyword(s, out keyword);
+            }
+            else if (value is CssKeyword k) keyword = k;
+
+            if (keyword != CssKeyword.NoKeyword && !CanHandleKeyword(keyword))
+                return SetAllValues(collection, new ComputedKeyword(keyword));
+
+            return ModifyInternal(collection, value);
+        }
+
+        // A var() inside a shorthand hands its text over on every read, so each expansion is kept.
+        private const int ExpandCacheLimit = 256;
+        private Dictionary<string, Dictionary<IStyleProperty, object>> expanded;
+
+        /// <summary>Whether an expansion can be shared; see <see cref="StyleConverterBase.ParsesArePure"/>.</summary>
+        internal virtual bool ExpandsArePure => true;
+
+        /// <summary>The longhands <paramref name="value"/> sets, shared between callers and not to be modified.</summary>
+        internal Dictionary<IStyleProperty, object> Expand(string value)
+        {
+            if (value == null) return null;
+            if (!ExpandsArePure)
+            {
+                var own = new Dictionary<IStyleProperty, object>();
+                Modify(own, value);
+                return own;
+            }
+
+            if (expanded == null) expanded = new Dictionary<string, Dictionary<IStyleProperty, object>>();
+            else if (expanded.TryGetValue(value, out var cached)) return cached;
+
+            var collection = new Dictionary<IStyleProperty, object>();
+            Modify(collection, value);
+
+            if (expanded.Count >= ExpandCacheLimit) expanded.Clear();
+            return expanded[value] = collection;
+        }
+
+        protected abstract List<IStyleProperty> ModifyInternal(IDictionary<IStyleProperty, object> collection, object value);
+    }
+}

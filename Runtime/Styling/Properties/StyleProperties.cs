@@ -1,0 +1,582 @@
+﻿using System;
+using System.Collections.Generic;
+using Yoga;
+
+using ReactUnity.Styling.Animations;
+using ReactUnity.Styling.Computed;
+using ReactUnity.Styling.Converters;
+using ReactUnity.Types;
+using TMPro;
+using UnityEngine;
+using Cursor = ReactUnity.Types.Cursor;
+using NavigationMode = UnityEngine.UI.Navigation.Mode;
+
+namespace ReactUnity.Styling
+{
+    public static class StyleProperties
+    {
+        public static readonly StyleProperty<float> opacity = new StyleProperty<float>("opacity", 1f, true, converter: AllConverters.PercentageConverter);
+        public static readonly StyleProperty<int?> zIndex = new StyleProperty<int?>("zIndex", null, false);
+        public static readonly StyleProperty<SortingLayer?> sortingLayer = new StyleProperty<SortingLayer?>("sortingLayer", null, false);
+        public static readonly StyleProperty<bool> visibility = new StyleProperty<bool>("visibility", true, converter: new BoolConverter(new string[] { "visible" }, new string[] { "hidden" }));
+        public static readonly StyleProperty<PositionType> position = new StyleProperty<PositionType>("position", PositionType.Relative);
+        public static readonly ValueListStyleProperty<Cursor> cursor = new ValueListStyleProperty<Cursor>("cursor");
+        public static readonly StyleProperty<Isolation> isolation = new StyleProperty<Isolation>("isolation", Isolation.Auto);
+        public static readonly StyleProperty<PointerEvents> pointerEvents = new StyleProperty<PointerEvents>("pointerEvents", PointerEvents.Auto);
+        public static readonly StyleProperty<ContainerType> containerType = new StyleProperty<ContainerType>("containerType", ContainerType.Normal, false, false, AllConverters.ContainerTypeConverter);
+        public static readonly StyleProperty<string> containerName = new StyleProperty<string>("containerName", null, false, false, AllConverters.ContainerNameConverter);
+        public static readonly StyleProperty<ColorScheme> colorScheme = new StyleProperty<ColorScheme>("colorScheme", ColorScheme.Normal, false, true, AllConverters.ColorSchemeConverter);
+        public static readonly StyleProperty<ScrollbarGutter> scrollbarGutter = new StyleProperty<ScrollbarGutter>("scrollbarGutter", ScrollbarGutter.Auto, false, false, AllConverters.ScrollbarGutterConverter);
+        public static readonly StyleProperty<ScrollBehavior> scrollBehavior = new StyleProperty<ScrollBehavior>("scrollBehavior", ScrollBehavior.Auto);
+        public static readonly StyleProperty<ScrollSnapType> scrollSnapType = new StyleProperty<ScrollSnapType>("scrollSnapType", ScrollSnapType.None, false, false, AllConverters.ScrollSnapTypeConverter);
+        // `overscroll-behavior` is per axis, and the logical pair is an alias rather than a property of
+        // its own: there are no vertical writing modes here, so inline is always x and block always y.
+        public static readonly StyleProperty<OverscrollBehavior> overscrollBehaviorX = new StyleProperty<OverscrollBehavior>("overscrollBehaviorX", OverscrollBehavior.Auto);
+        public static readonly StyleProperty<OverscrollBehavior> overscrollBehaviorY = new StyleProperty<OverscrollBehavior>("overscrollBehaviorY", OverscrollBehavior.Auto);
+        public static readonly StyleProperty<ScrollSnapAlign> scrollSnapAlign = new StyleProperty<ScrollSnapAlign>("scrollSnapAlign", ScrollSnapAlign.None, false, false, AllConverters.ScrollSnapAlignConverter);
+        public static readonly StyleProperty<ScrollSnapStop> scrollSnapStop = new StyleProperty<ScrollSnapStop>("scrollSnapStop", ScrollSnapStop.Normal);
+        // `scroll-padding` insets the snapport of a scroll container -- the box a snap target is lined
+        // up against -- so a sticky header's worth of it keeps the snapped item out from under the
+        // header. A percentage is of the scrollport on that axis, and `auto` is read as none of it.
+        public static readonly StyleProperty<YogaValue> scrollPaddingTop = new StyleProperty<YogaValue>("scrollPaddingTop", YogaValue.Undefined(), true);
+        public static readonly StyleProperty<YogaValue> scrollPaddingRight = new StyleProperty<YogaValue>("scrollPaddingRight", YogaValue.Undefined(), true);
+        public static readonly StyleProperty<YogaValue> scrollPaddingBottom = new StyleProperty<YogaValue>("scrollPaddingBottom", YogaValue.Undefined(), true);
+        public static readonly StyleProperty<YogaValue> scrollPaddingLeft = new StyleProperty<YogaValue>("scrollPaddingLeft", YogaValue.Undefined(), true);
+        public static readonly StyleProperty<YogaValue> scrollPaddingInlineStart = new StyleProperty<YogaValue>("scrollPaddingInlineStart", YogaValue.Undefined(), true);
+        public static readonly StyleProperty<YogaValue> scrollPaddingInlineEnd = new StyleProperty<YogaValue>("scrollPaddingInlineEnd", YogaValue.Undefined(), true);
+        // `scroll-margin` outsets the snap area of a target, which is its border box otherwise. Lengths
+        // only: a percentage has nothing to resolve against, since the box is the thing being outset.
+        public static readonly StyleProperty<float> scrollMarginTop = new StyleProperty<float>("scrollMarginTop", 0f, true, false, AllConverters.LengthConverter);
+        public static readonly StyleProperty<float> scrollMarginRight = new StyleProperty<float>("scrollMarginRight", 0f, true, false, AllConverters.LengthConverter);
+        public static readonly StyleProperty<float> scrollMarginBottom = new StyleProperty<float>("scrollMarginBottom", 0f, true, false, AllConverters.LengthConverter);
+        public static readonly StyleProperty<float> scrollMarginLeft = new StyleProperty<float>("scrollMarginLeft", 0f, true, false, AllConverters.LengthConverter);
+        public static readonly StyleProperty<float> scrollMarginInlineStart = new StyleProperty<float>("scrollMarginInlineStart", 0f, true, false, AllConverters.LengthConverter);
+        public static readonly StyleProperty<float> scrollMarginInlineEnd = new StyleProperty<float>("scrollMarginInlineEnd", 0f, true, false, AllConverters.LengthConverter);
+        public static readonly StyleProperty<YogaValue2> borderTopLeftRadius = new StyleProperty<YogaValue2>("borderTopLeftRadius", YogaValue2.Zero, true, converter: AllConverters.BorderRadiusConverter);
+        public static readonly StyleProperty<YogaValue2> borderTopRightRadius = new StyleProperty<YogaValue2>("borderTopRightRadius", YogaValue2.Zero, true, converter: AllConverters.BorderRadiusConverter);
+        public static readonly StyleProperty<YogaValue2> borderBottomLeftRadius = new StyleProperty<YogaValue2>("borderBottomLeftRadius", YogaValue2.Zero, true, converter: AllConverters.BorderRadiusConverter);
+        public static readonly StyleProperty<YogaValue2> borderBottomRightRadius = new StyleProperty<YogaValue2>("borderBottomRightRadius", YogaValue2.Zero, true, converter: AllConverters.BorderRadiusConverter);
+        public static readonly StyleProperty<Color> borderLeftColor = new StyleProperty<Color>("borderLeftColor", Color.black, true);
+        public static readonly StyleProperty<Color> borderRightColor = new StyleProperty<Color>("borderRightColor", Color.black, true);
+        public static readonly StyleProperty<Color> borderTopColor = new StyleProperty<Color>("borderTopColor", Color.black, true);
+        public static readonly StyleProperty<Color> borderBottomColor = new StyleProperty<Color>("borderBottomColor", Color.black, true);
+        public static readonly StyleProperty<BorderStyle> borderLeftStyle = new StyleProperty<BorderStyle>("borderLeftStyle", BorderStyle.Solid, false);
+        public static readonly StyleProperty<BorderStyle> borderRightStyle = new StyleProperty<BorderStyle>("borderRightStyle", BorderStyle.Solid, false);
+        public static readonly StyleProperty<BorderStyle> borderTopStyle = new StyleProperty<BorderStyle>("borderTopStyle", BorderStyle.Solid, false);
+        public static readonly StyleProperty<BorderStyle> borderBottomStyle = new StyleProperty<BorderStyle>("borderBottomStyle", BorderStyle.Solid, false);
+
+        // The inline-axis halves of the painted border properties. Unlike the block-axis spellings --
+        // which are plain aliases for top and bottom, since there is no `writing-mode` here -- these
+        // cannot be mapped to an edge while the sheet is parsed: which one they land on is the
+        // element's resolved `direction`. NodeStyle picks the edge, and a declared logical value wins
+        // over the physical property it covers, which is how Yoga already resolves Start against Left.
+        public static readonly StyleProperty<Color> borderInlineStartColor = new StyleProperty<Color>("borderInlineStartColor", Color.black, true);
+        public static readonly StyleProperty<Color> borderInlineEndColor = new StyleProperty<Color>("borderInlineEndColor", Color.black, true);
+        public static readonly StyleProperty<BorderStyle> borderInlineStartStyle = new StyleProperty<BorderStyle>("borderInlineStartStyle", BorderStyle.Solid, false);
+        public static readonly StyleProperty<BorderStyle> borderInlineEndStyle = new StyleProperty<BorderStyle>("borderInlineEndStyle", BorderStyle.Solid, false);
+        // A logical corner is named block edge first, so `start-end` is the block-start inline-end one
+        // -- top right in a left-to-right element, top left in a right-to-left one.
+        public static readonly StyleProperty<YogaValue2> borderStartStartRadius = new StyleProperty<YogaValue2>("borderStartStartRadius", YogaValue2.Zero, true, converter: AllConverters.BorderRadiusConverter);
+        public static readonly StyleProperty<YogaValue2> borderStartEndRadius = new StyleProperty<YogaValue2>("borderStartEndRadius", YogaValue2.Zero, true, converter: AllConverters.BorderRadiusConverter);
+        public static readonly StyleProperty<YogaValue2> borderEndStartRadius = new StyleProperty<YogaValue2>("borderEndStartRadius", YogaValue2.Zero, true, converter: AllConverters.BorderRadiusConverter);
+        public static readonly StyleProperty<YogaValue2> borderEndEndRadius = new StyleProperty<YogaValue2>("borderEndEndRadius", YogaValue2.Zero, true, converter: AllConverters.BorderRadiusConverter);
+        public static readonly StyleProperty<float> outlineOffset = new StyleProperty<float>("outlineOffset", 0f, true, false, AllConverters.LengthConverter);
+        public static readonly StyleProperty<float> outlineWidth = new StyleProperty<float>("outlineWidth", 0f, true, false, AllConverters.LengthConverter);
+        public static readonly StyleProperty<Color> outlineColor = new StyleProperty<Color>("outlineColor", Color.black, true);
+        public static readonly StyleProperty<BorderStyle> outlineStyle = new StyleProperty<BorderStyle>("outlineStyle", BorderStyle.Solid, false);
+        public static readonly StyleProperty<YogaValue2> transformOrigin = new StyleProperty<YogaValue2>("transformOrigin", YogaValue2.Center, true);
+        public static readonly StyleProperty<YogaValue2> translate = new StyleProperty<YogaValue2>("translate", YogaValue2.Zero, true);
+        public static readonly StyleProperty<YogaValue> translateZ = new StyleProperty<YogaValue>("translateZ", YogaValue.Point(0), true);
+        public static readonly StyleProperty<Vector3> scale = new StyleProperty<Vector3>("scale", Vector3.one, true, false, AllConverters.ScaleConverter);
+        public static readonly StyleProperty<Vector3> rotate = new StyleProperty<Vector3>("rotate", Vector3.zero, true, converter: AllConverters.RotateConverter);
+        public static readonly StyleProperty<float> perspective = new StyleProperty<float>("perspective", 0f, true, false, AllConverters.PerspectiveConverter);
+        public static readonly StyleProperty<YogaValue2> perspectiveOrigin = new StyleProperty<YogaValue2>("perspectiveOrigin", YogaValue2.Center, true);
+        public static readonly StyleProperty<BackfaceVisibility> backfaceVisibility = new StyleProperty<BackfaceVisibility>("backfaceVisibility", BackfaceVisibility.Visible);
+        public static readonly StyleProperty<FontReference> fontFamily = new StyleProperty<FontReference>("fontFamily", FontReference.None, false, true);
+        public static readonly StyleProperty<Color> color = new StyleProperty<Color>("color", ComputedCurrentColor.Instance, true, false);
+        public static readonly StyleProperty<FontWeight> fontWeight = new StyleProperty<FontWeight>("fontWeight", FontWeight.Regular, false, true);
+        public static readonly StyleProperty<FontStyles> fontStyle = new StyleProperty<FontStyles>("fontStyle", FontStyles.Normal, false, true, converter: new EnumConverter(typeof(FontStyles), true, new Dictionary<string, object> { { "linethrough", FontStyles.Strikethrough }, { "none", FontStyles.Normal } }));
+        // `font-variant` lands here too: TextMeshPro's small caps are a case transform, which is why `text-transform: small-caps` already existed.
+        public static readonly StyleProperty<TextTransform> textTransform = new StyleProperty<TextTransform>("textTransform", TextTransform.None, false, true, converter: new EnumConverter(typeof(TextTransform), false, true, new Dictionary<string, object>
+        {
+            { "normal", TextTransform.None },
+            { "allsmallcaps", TextTransform.SmallCaps },
+            { "petitecaps", TextTransform.SmallCaps },
+            { "allpetitecaps", TextTransform.SmallCaps },
+        }));
+        public static readonly StyleProperty<float> fontSize = new StyleProperty<float>("fontSize", ComputedFontSize.Default, true, false, AllConverters.FontSizeConverter);
+        public static readonly StyleProperty<float> lineHeight = new StyleProperty<float>("lineHeight", new ComputedFontProperty(1, ComputedFontProperty.FontPropertyType.LineHeight), true, true, AllConverters.LineHeightConverter);
+        public static readonly StyleProperty<float> letterSpacing = new StyleProperty<float>("letterSpacing", 0f, true, true, AllConverters.FontSizeConverter);
+        public static readonly StyleProperty<float> wordSpacing = new StyleProperty<float>("wordSpacing", 0f, true, true, AllConverters.FontSizeConverter);
+        // `start` and `end` do not follow `direction`: TextMeshPro has no direction-aware alignment.
+        public static readonly StyleProperty<TextAlignmentOptions> textAlign = new StyleProperty<TextAlignmentOptions>("textAlign", TextAlignmentOptions.Converted, false, true, converter: new EnumConverter(typeof(TextAlignmentOptions), false, true, new Dictionary<string, object>
+        {
+            { "justify", TextAlignmentOptions.Justified },
+            { "start", TextAlignmentOptions.Left },
+            { "end", TextAlignmentOptions.Right },
+            { "matchparent", TextAlignmentOptions.Left },
+        }));
+        public static readonly StyleProperty<VerticalAlignmentOptions> verticalAlign = new StyleProperty<VerticalAlignmentOptions>("verticalAlign", VerticalAlignmentOptions.Top, false, true);
+        public static readonly StyleProperty<TextOverflowModes> textOverflow = new StyleProperty<TextOverflowModes>("textOverflow", TextOverflowModes.Overflow, false, true, converter: new EnumConverter(typeof(TextOverflowModes), false, true, new Dictionary<string, object>
+        {
+            { "clip", TextOverflowModes.Masking },
+        }));
+        // `white-space` and `text-wrap` share this: `balance`, `pretty` and `stable` are all a wrap TextMeshPro cannot refine.
+        public static readonly StyleProperty<WhiteSpace> whiteSpace = new StyleProperty<WhiteSpace>("whiteSpace", WhiteSpace.Normal, false, true, converter: new EnumConverter(typeof(WhiteSpace), false, true, new Dictionary<string, object>
+        {
+            { "wrap", WhiteSpace.Normal },
+            { "balance", WhiteSpace.Normal },
+            { "pretty", WhiteSpace.Normal },
+            { "stable", WhiteSpace.Normal },
+        }));
+        public static readonly StyleProperty<int> maxLines = new StyleProperty<int>("maxLines", (int) short.MaxValue, true, true);
+        public static readonly StyleProperty<float> textStrokeWidth = new StyleProperty<float>("textStrokeWidth", 0f, true, true, AllConverters.FontSizeConverter);
+        public static readonly StyleProperty<Color> textStrokeColor = new StyleProperty<Color>("textStrokeColor", ComputedCurrentColor.Instance, true, true);
+        // Inherited, where the web's is not: the line itself rides on `fontStyle`, which is
+        // inherited, so a non-inherited colour would draw nested text's underline in the wrong one.
+        public static readonly StyleProperty<Color> textDecorationColor = new StyleProperty<Color>("textDecorationColor", ComputedCurrentColor.Instance, true, true);
+        public static readonly StyleProperty<string> content = new StyleProperty<string>("content", null, false);
+        public static readonly StyleProperty<Appearance> appearance = new StyleProperty<Appearance>("appearance", Appearance.None);
+        public static readonly StyleProperty<NavigationMode> navigation = new StyleProperty<NavigationMode>("navigation", NavigationMode.Automatic);
+        public static readonly StyleProperty<float> stateDuration = new StyleProperty<float>("stateDuration", 0f, true, false, AllConverters.DurationConverter);
+        public static readonly StyleProperty<ObjectFit> objectFit = new StyleProperty<ObjectFit>("objectFit", ObjectFit.Fill);
+        public static readonly StyleProperty<YogaValue2> objectPosition = new StyleProperty<YogaValue2>("objectPosition", YogaValue2.Center, true);
+
+        public static readonly ValueListStyleProperty<BoxShadow> boxShadow = new ValueListStyleProperty<BoxShadow>("boxShadow", BoxShadow.Default, true);
+        // Same grammar minus spread and inset; only the first shadow is drawn, since TextMeshPro has one underlay per material.
+        public static readonly ValueListStyleProperty<BoxShadow> textShadow = new ValueListStyleProperty<BoxShadow>("textShadow", BoxShadow.Default, true, true);
+        public static readonly StyleProperty<Color> caretColor = new StyleProperty<Color>("caretColor", ComputedCurrentColor.Instance, true, false);
+
+        // Yoga has one overflow for both axes. These are what `overflow-x`/`overflow-y` set; the layout
+        // value and the mask are derived from all three, and a scroll view reads them for its direction.
+        public static readonly StyleProperty<YogaOverflow> overflowX = new StyleProperty<YogaOverflow>("overflowX", YogaOverflow.Visible, false, false, LayoutProperties.OverflowConverter);
+        public static readonly StyleProperty<YogaOverflow> overflowY = new StyleProperty<YogaOverflow>("overflowY", YogaOverflow.Visible, false, false, LayoutProperties.OverflowConverter);
+
+        public static readonly StyleProperty<ImageDefinition> borderImageSource = new StyleProperty<ImageDefinition>("borderImageSource");
+        public static readonly StyleProperty<BorderImageSlice> borderImageSlice = new StyleProperty<BorderImageSlice>("borderImageSlice", BorderImageSlice.Auto, true);
+        public static readonly FourDirectionalStyleProperty<BackgroundRepeat> borderImageRepeat = new FourDirectionalStyleProperty<BackgroundRepeat>("borderImageRepeat", BackgroundRepeat.Stretch, false);
+        public static readonly FourDirectionalStyleProperty<YogaValue> borderImageOutset = new FourDirectionalStyleProperty<YogaValue>("borderImageOutset", YogaValue.Point(0), true);
+        public static readonly FourDirectionalStyleProperty<YogaValue> borderImageWidth = new FourDirectionalStyleProperty<YogaValue>("borderImageWidth", YogaValue.Auto(), true);
+
+        public static readonly StyleProperty<Color> backgroundColor = new StyleProperty<Color>("backgroundColor", new Color(0, 0, 0, 0), true);
+        public static readonly ValueListStyleProperty<ImageDefinition> backgroundImage = new ValueListStyleProperty<ImageDefinition>("backgroundImage");
+        public static readonly ValueListStyleProperty<YogaValue> backgroundPositionX = new ValueListStyleProperty<YogaValue>("backgroundPositionX");
+        public static readonly ValueListStyleProperty<YogaValue> backgroundPositionY = new ValueListStyleProperty<YogaValue>("backgroundPositionY");
+        public static readonly ValueListStyleProperty<BackgroundSize> backgroundSize = new ValueListStyleProperty<BackgroundSize>("backgroundSize", BackgroundSize.Auto);
+        public static readonly ValueListStyleProperty<BackgroundRepeat> backgroundRepeatX = new ValueListStyleProperty<BackgroundRepeat>("backgroundRepeatX", BackgroundRepeat.Repeat);
+        public static readonly ValueListStyleProperty<BackgroundRepeat> backgroundRepeatY = new ValueListStyleProperty<BackgroundRepeat>("backgroundRepeatY", BackgroundRepeat.Repeat);
+        public static readonly ValueListStyleProperty<BackgroundBlendMode> backgroundBlendMode = new ValueListStyleProperty<BackgroundBlendMode>("backgroundBlendMode", BackgroundBlendMode.Normal);
+        // One clip per layer, as CSS has it. The background colour takes the last layer's value.
+        public static readonly ValueListStyleProperty<BackgroundBox> backgroundClip = new ValueListStyleProperty<BackgroundBox>("backgroundClip", BackgroundBox.BorderBox);
+
+        public static readonly ValueListStyleProperty<ImageDefinition> maskImage = new ValueListStyleProperty<ImageDefinition>("maskImage");
+        public static readonly ValueListStyleProperty<YogaValue> maskPositionX = new ValueListStyleProperty<YogaValue>("maskPositionX");
+        public static readonly ValueListStyleProperty<YogaValue> maskPositionY = new ValueListStyleProperty<YogaValue>("maskPositionY");
+        public static readonly ValueListStyleProperty<BackgroundSize> maskSize = new ValueListStyleProperty<BackgroundSize>("maskSize", BackgroundSize.Auto);
+        public static readonly ValueListStyleProperty<BackgroundRepeat> maskRepeatX = new ValueListStyleProperty<BackgroundRepeat>("maskRepeatX", BackgroundRepeat.Repeat);
+        public static readonly ValueListStyleProperty<BackgroundRepeat> maskRepeatY = new ValueListStyleProperty<BackgroundRepeat>("maskRepeatY", BackgroundRepeat.Repeat);
+        // A list to match the CSS grammar, but the composite reads one mode for the whole mask -- the
+        // layers are already flattened into a single texture by the time it samples them.
+        public static readonly ValueListStyleProperty<MaskMode> maskMode = new ValueListStyleProperty<MaskMode>("maskMode", MaskMode.MatchSource);
+
+        public static readonly StyleProperty<ClipPath> clipPath = new StyleProperty<ClipPath>("clipPath", ClipPath.None, true, false, AllConverters.ClipPathConverter);
+        public static readonly StyleProperty<ImageRendering> imageRendering = new StyleProperty<ImageRendering>("imageRendering", ImageRendering.Auto, false, true);
+        public static readonly StyleProperty<ShapeRendering> shapeRendering = new StyleProperty<ShapeRendering>("shapeRendering", ShapeRendering.Auto, false, true);
+
+        public static readonly StyleProperty<FilterDefinition> filter = new StyleProperty<FilterDefinition>("filter");
+        public static readonly StyleProperty<FilterDefinition> backdropFilter = new StyleProperty<FilterDefinition>("backdropFilter");
+        public static readonly StyleProperty<BackgroundBlendMode> mixBlendMode = new StyleProperty<BackgroundBlendMode>("mixBlendMode", BackgroundBlendMode.Normal);
+
+        public static readonly ValueListStyleProperty<TransitionProperty> transitionProperty = new ValueListStyleProperty<TransitionProperty>("transitionProperty");
+        public static readonly ValueListStyleProperty<float> transitionDuration = new ValueListStyleProperty<float>("transitionDuration", baseConverter: AllConverters.DurationConverter);
+        public static readonly ValueListStyleProperty<TimingFunction> transitionTimingFunction = new ValueListStyleProperty<TimingFunction>("transitionTimingFunction", TimingFunctions.Default);
+        public static readonly ValueListStyleProperty<float> transitionDelay = new ValueListStyleProperty<float>("transitionDelay", baseConverter: AllConverters.DurationConverter);
+        public static readonly ValueListStyleProperty<AnimationPlayState> transitionPlayState = new ValueListStyleProperty<AnimationPlayState>("transitionPlayState");
+
+        public static readonly StyleProperty<float> motionDuration = new StyleProperty<float>("motionDuration", 0f, false, false, AllConverters.DurationConverter);
+        public static readonly StyleProperty<TimingFunction> motionTimingFunction = new StyleProperty<TimingFunction>("motionTimingFunction", TimingFunctions.Default, false);
+        public static readonly StyleProperty<float> motionDelay = new StyleProperty<float>("motionDelay", 0f, false, false,  AllConverters.DurationConverter);
+
+        public static readonly ValueListStyleProperty<float> animationDelay = new ValueListStyleProperty<float>("animationDelay", baseConverter: AllConverters.DurationConverter);
+        public static readonly ValueListStyleProperty<AnimationDirection> animationDirection = new ValueListStyleProperty<AnimationDirection>("animationDirection");
+        public static readonly ValueListStyleProperty<float> animationDuration = new ValueListStyleProperty<float>("animationDuration", baseConverter: AllConverters.DurationConverter);
+        public static readonly ValueListStyleProperty<AnimationFillMode> animationFillMode = new ValueListStyleProperty<AnimationFillMode>("animationFillMode");
+        public static readonly ValueListStyleProperty<int> animationIterationCount = new ValueListStyleProperty<int>("animationIterationCount", 1, baseConverter: AllConverters.IterationCountConverter);
+        public static readonly ValueListStyleProperty<string> animationName = new ValueListStyleProperty<string>("animationName");
+        public static readonly ValueListStyleProperty<AnimationPlayState> animationPlayState = new ValueListStyleProperty<AnimationPlayState>("animationPlayState");
+        public static readonly ValueListStyleProperty<TimingFunction> animationTimingFunction = new ValueListStyleProperty<TimingFunction>("animationTimingFunction", TimingFunctions.Default);
+        public static readonly ValueListStyleProperty<AnimationTimeline> animationTimeline = new ValueListStyleProperty<AnimationTimeline>("animationTimeline", AnimationTimeline.Auto, baseConverter: AllConverters.AnimationTimelineConverter);
+        public static readonly ValueListStyleProperty<AnimationRangeBoundary> animationRangeStart = new ValueListStyleProperty<AnimationRangeBoundary>("animationRangeStart", new AnimationRangeBoundary(), baseConverter: AllConverters.AnimationRangeConverter);
+        public static readonly ValueListStyleProperty<AnimationRangeBoundary> animationRangeEnd = new ValueListStyleProperty<AnimationRangeBoundary>("animationRangeEnd", new AnimationRangeBoundary(), baseConverter: AllConverters.AnimationRangeConverter);
+
+        public static readonly StyleProperty<string> scrollTimelineName = new StyleProperty<string>("scrollTimelineName", null, false, false, AllConverters.TimelineNameConverter);
+        public static readonly StyleProperty<TimelineAxis> scrollTimelineAxis = new StyleProperty<TimelineAxis>("scrollTimelineAxis", TimelineAxis.Block, false, false);
+        public static readonly StyleProperty<string> viewTimelineName = new StyleProperty<string>("viewTimelineName", null, false, false, AllConverters.TimelineNameConverter);
+        public static readonly StyleProperty<TimelineAxis> viewTimelineAxis = new StyleProperty<TimelineAxis>("viewTimelineAxis", TimelineAxis.Block, false, false);
+        public static readonly StyleProperty<YogaValue2> viewTimelineInset = new StyleProperty<YogaValue2>("viewTimelineInset", YogaValue2.Zero, false, false, AllConverters.TimelineInsetConverter);
+        public static readonly StyleProperty<string> timelineScope = new StyleProperty<string>("timelineScope", null, false, false, AllConverters.TimelineScopeConverter);
+
+        public static readonly ValueListStyleProperty<AudioReference> audioClip = new ValueListStyleProperty<AudioReference>("audioClip");
+        public static readonly ValueListStyleProperty<int> audioIterationCount = new ValueListStyleProperty<int>("audioIterationCount", 1, baseConverter: AllConverters.IterationCountConverter);
+        public static readonly ValueListStyleProperty<float> audioDelay = new ValueListStyleProperty<float>("audioDelay", baseConverter: AllConverters.DurationConverter);
+        public static readonly ValueListStyleProperty<float> audioVolume = new ValueListStyleProperty<float>("audioVolume", 1f, true, baseConverter: AllConverters.PercentageConverter);
+        public static readonly ValueListStyleProperty<float> audioPitch = new ValueListStyleProperty<float>("audioPitch", 1f);
+
+        public static readonly Dictionary<string, IStyleProperty> PropertyMap = new Dictionary<string, IStyleProperty>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "opacity", opacity },
+            { "zIndex", zIndex },
+            { "sortingLayer", sortingLayer },
+            { "visibility", visibility },
+            { "position", position },
+            { "cursor", cursor },
+            { "isolation", isolation },
+            { "pointerEvents", pointerEvents },
+            { "containerType", containerType },
+            { "containerName", containerName },
+            { "colorScheme", colorScheme },
+            { "scrollbarGutter", scrollbarGutter },
+            { "scrollBehavior", scrollBehavior },
+            { "scrollSnapType", scrollSnapType },
+            { "overscrollBehaviorX", overscrollBehaviorX },
+            { "overscrollBehaviorY", overscrollBehaviorY },
+            { "overscrollBehaviorInline", overscrollBehaviorX },
+            { "overscrollBehaviorBlock", overscrollBehaviorY },
+            { "scrollSnapAlign", scrollSnapAlign },
+            { "scrollSnapStop", scrollSnapStop },
+            { "scrollPaddingTop", scrollPaddingTop },
+            { "scrollPaddingRight", scrollPaddingRight },
+            { "scrollPaddingBottom", scrollPaddingBottom },
+            { "scrollPaddingLeft", scrollPaddingLeft },
+            { "scrollPaddingInlineStart", scrollPaddingInlineStart },
+            { "scrollPaddingInlineEnd", scrollPaddingInlineEnd },
+            { "scrollPaddingBlockStart", scrollPaddingTop },
+            { "scrollPaddingBlockEnd", scrollPaddingBottom },
+            { "scrollMarginTop", scrollMarginTop },
+            { "scrollMarginRight", scrollMarginRight },
+            { "scrollMarginBottom", scrollMarginBottom },
+            { "scrollMarginLeft", scrollMarginLeft },
+            { "scrollMarginInlineStart", scrollMarginInlineStart },
+            { "scrollMarginInlineEnd", scrollMarginInlineEnd },
+            { "scrollMarginBlockStart", scrollMarginTop },
+            { "scrollMarginBlockEnd", scrollMarginBottom },
+            { "borderTopLeftRadius", borderTopLeftRadius },
+            { "borderTopRightRadius", borderTopRightRadius },
+            { "borderBottomLeftRadius", borderBottomLeftRadius },
+            { "borderBottomRightRadius", borderBottomRightRadius },
+            { "borderLeftColor", borderLeftColor },
+            { "borderRightColor", borderRightColor },
+            { "borderTopColor", borderTopColor },
+            { "borderBottomColor", borderBottomColor },
+            { "borderLeftStyle", borderLeftStyle },
+            { "borderRightStyle", borderRightStyle},
+            { "borderTopStyle", borderTopStyle},
+            { "borderBottomStyle", borderBottomStyle},
+            { "borderInlineStartColor", borderInlineStartColor },
+            { "borderInlineEndColor", borderInlineEndColor },
+            { "borderBlockStartColor", borderTopColor },
+            { "borderBlockEndColor", borderBottomColor },
+            { "borderInlineStartStyle", borderInlineStartStyle },
+            { "borderInlineEndStyle", borderInlineEndStyle },
+            { "borderBlockStartStyle", borderTopStyle },
+            { "borderBlockEndStyle", borderBottomStyle },
+            { "borderStartStartRadius", borderStartStartRadius },
+            { "borderStartEndRadius", borderStartEndRadius },
+            { "borderEndStartRadius", borderEndStartRadius },
+            { "borderEndEndRadius", borderEndEndRadius },
+            { "outlineOffset", outlineOffset },
+            { "outlineWidth", outlineWidth },
+            { "outlineColor", outlineColor },
+            { "outlineStyle", outlineStyle },
+            { "boxShadow", boxShadow },
+            { "transformOrigin", transformOrigin },
+            { "translate", translate },
+            { "translateZ", translateZ },
+            { "scale", scale },
+            { "rotate", rotate },
+            { "perspective", perspective },
+            { "perspectiveOrigin", perspectiveOrigin },
+            { "backfaceVisibility", backfaceVisibility },
+            { "fontFamily", fontFamily },
+            { "color", color },
+            { "fontWeight", fontWeight },
+            { "fontStyle", fontStyle },
+            { "fontSize", fontSize },
+            { "lineHeight", lineHeight },
+            { "letterSpacing", letterSpacing },
+            { "wordSpacing", wordSpacing },
+            { "textAlign", textAlign },
+            { "verticalAlign", verticalAlign },
+            { "textOverflow", textOverflow },
+            { "textWrap", whiteSpace },
+            { "whiteSpace", whiteSpace },
+            { "textDecorationLine", fontStyle },
+            { "fontVariant", textTransform },
+            { "fontVariantCaps", textTransform },
+            { "textShadow", textShadow },
+            { "caretColor", caretColor },
+            { "overflowX", overflowX },
+            { "overflowY", overflowY },
+            { "maxLines", maxLines },
+            { "lineClamp", maxLines },
+            { "textStrokeWidth", textStrokeWidth },
+            { "textStrokeColor", textStrokeColor },
+            { "textDecorationColor", textDecorationColor },
+            { "content", content },
+            { "appearance", appearance },
+            { "navigation", navigation },
+            { "stateDuration", stateDuration },
+            { "objectFit", objectFit },
+            { "objectPosition", objectPosition },
+
+            { "borderImageSource", borderImageSource },
+            { "borderImageSlice", borderImageSlice },
+            { "borderImageRepeat", borderImageRepeat },
+            { "borderImageOutset", borderImageOutset },
+            { "borderImageWidth", borderImageWidth },
+
+            { "backgroundColor", backgroundColor },
+            { "backgroundImage", backgroundImage },
+            { "backgroundPositionX", backgroundPositionX },
+            { "backgroundPositionY", backgroundPositionY },
+            { "backgroundSize", backgroundSize },
+            { "backgroundRepeatX", backgroundRepeatX },
+            { "backgroundRepeatY", backgroundRepeatY },
+            { "backgroundBlendMode", backgroundBlendMode },
+            { "backgroundClip", backgroundClip },
+
+            { "maskImage", maskImage },
+            { "maskPositionX", maskPositionX },
+            { "maskPositionY", maskPositionY },
+            { "maskSize", maskSize },
+            { "maskRepeatX", maskRepeatX },
+            { "maskRepeatY", maskRepeatY },
+            { "maskMode", maskMode },
+
+            { "clipPath", clipPath },
+            { "imageRendering", imageRendering },
+            { "shapeRendering", shapeRendering },
+
+            { "filter", filter },
+            { "backdropFilter", backdropFilter },
+            { "mixBlendMode", mixBlendMode },
+
+            { "transitionProperty", transitionProperty },
+            { "transitionDuration", transitionDuration },
+            { "transitionTimingFunction", transitionTimingFunction },
+            { "transitionDelay", transitionDelay },
+            { "transitionPlayState", transitionPlayState },
+
+            { "transition-property", transitionProperty },
+            { "transition-duration", transitionDuration },
+            { "transition-timing-function", transitionTimingFunction },
+            { "transition-delay", transitionDelay },
+            { "transition-play-state", transitionPlayState },
+
+            { "motionDuration", motionDuration },
+            { "motionTimingFunction", motionTimingFunction },
+            { "motionDelay", motionDelay },
+
+            { "motion-duration", motionDuration },
+            { "motion-timing-function", motionTimingFunction },
+            { "motion-delay", motionDelay },
+
+            { "animationDelay", animationDelay },
+            { "animationDirection", animationDirection },
+            { "animationDuration", animationDuration },
+            { "animationFillMode", animationFillMode },
+            { "animationIterationCount", animationIterationCount },
+            { "animationName", animationName },
+            { "animationPlayState", animationPlayState },
+            { "animationTimingFunction", animationTimingFunction },
+            { "animationTimeline", animationTimeline },
+            { "animationRangeStart", animationRangeStart },
+            { "animationRangeEnd", animationRangeEnd },
+            { "scrollTimelineName", scrollTimelineName },
+            { "scrollTimelineAxis", scrollTimelineAxis },
+            { "viewTimelineName", viewTimelineName },
+            { "viewTimelineAxis", viewTimelineAxis },
+            { "viewTimelineInset", viewTimelineInset },
+            { "timelineScope", timelineScope },
+
+            { "animation-delay", animationDelay },
+            { "animation-direction", animationDirection },
+            { "animation-duration", animationDuration },
+            { "animation-fill-mode", animationFillMode },
+            { "animation-iteration-count", animationIterationCount },
+            { "animation-name", animationName },
+            { "animation-play-state", animationPlayState },
+            { "animation-timing-function", animationTimingFunction },
+            { "animation-timeline", animationTimeline },
+            { "animation-range-start", animationRangeStart },
+            { "animation-range-end", animationRangeEnd },
+            { "scroll-timeline-name", scrollTimelineName },
+            { "scroll-timeline-axis", scrollTimelineAxis },
+            { "view-timeline-name", viewTimelineName },
+            { "view-timeline-axis", viewTimelineAxis },
+            { "view-timeline-inset", viewTimelineInset },
+            { "timeline-scope", timelineScope },
+
+            { "audioClip", audioClip },
+            { "audioDelay", audioDelay },
+            { "audioIterationCount", audioIterationCount },
+            { "audioVolume", audioVolume },
+            { "audioPitch", audioPitch },
+
+            { "audio-clip", audioClip },
+            { "audio-delay", audioDelay },
+            { "audio-iteration-count", audioIterationCount },
+            { "audio-volume", audioVolume },
+            { "audio-pitch", audioPitch },
+
+            { "border-image-source", borderImageSource },
+            { "border-image-slice", borderImageSlice },
+            { "border-image-repeat", borderImageRepeat },
+            { "border-image-outset", borderImageOutset },
+            { "border-image-width", borderImageWidth },
+
+            { "z-index", zIndex },
+            { "sorting-layer", sortingLayer },
+            { "pointer-events", pointerEvents },
+            { "container-type", containerType },
+            { "container-name", containerName },
+            { "color-scheme", colorScheme },
+            { "scrollbar-gutter", scrollbarGutter },
+            { "scroll-behavior", scrollBehavior },
+            { "scroll-snap-type", scrollSnapType },
+            { "overscroll-behavior-x", overscrollBehaviorX },
+            { "overscroll-behavior-y", overscrollBehaviorY },
+            { "overscroll-behavior-inline", overscrollBehaviorX },
+            { "overscroll-behavior-block", overscrollBehaviorY },
+            { "scroll-snap-align", scrollSnapAlign },
+            { "scroll-snap-stop", scrollSnapStop },
+            { "scroll-padding-top", scrollPaddingTop },
+            { "scroll-padding-right", scrollPaddingRight },
+            { "scroll-padding-bottom", scrollPaddingBottom },
+            { "scroll-padding-left", scrollPaddingLeft },
+            { "scroll-padding-inline-start", scrollPaddingInlineStart },
+            { "scroll-padding-inline-end", scrollPaddingInlineEnd },
+            { "scroll-padding-block-start", scrollPaddingTop },
+            { "scroll-padding-block-end", scrollPaddingBottom },
+            { "scroll-margin-top", scrollMarginTop },
+            { "scroll-margin-right", scrollMarginRight },
+            { "scroll-margin-bottom", scrollMarginBottom },
+            { "scroll-margin-left", scrollMarginLeft },
+            { "scroll-margin-inline-start", scrollMarginInlineStart },
+            { "scroll-margin-inline-end", scrollMarginInlineEnd },
+            { "scroll-margin-block-start", scrollMarginTop },
+            { "scroll-margin-block-end", scrollMarginBottom },
+            { "background-color", backgroundColor },
+            { "background-image", backgroundImage },
+            { "background-position-x", backgroundPositionX },
+            { "background-position-y", backgroundPositionY },
+            { "background-size", backgroundSize },
+            { "background-repeat-x", backgroundRepeatX },
+            { "background-repeat-y", backgroundRepeatY },
+            { "background-blend-mode", backgroundBlendMode },
+            { "background-clip", backgroundClip },
+            { "mask-image", maskImage },
+            { "mask-position-x", maskPositionX },
+            { "mask-position-y", maskPositionY },
+            { "mask-size", maskSize },
+            { "mask-repeat-x", maskRepeatX },
+            { "mask-repeat-y", maskRepeatY },
+            { "mask-mode", maskMode },
+            // `mask-type` is the same choice made on the mask itself rather than on its user, which
+            // is a distinction only an SVG `<mask>` element can draw.
+            { "mask-type", maskMode },
+            { "clip-path", clipPath },
+            { "image-rendering", imageRendering },
+            { "shape-rendering", shapeRendering },
+            { "backdrop-filter", backdropFilter },
+            { "mix-blend-mode", mixBlendMode },
+            { "border-top-left-radius", borderTopLeftRadius },
+            { "border-top-right-radius", borderTopRightRadius },
+            { "border-bottom-left-radius", borderBottomLeftRadius },
+            { "border-bottom-right-radius", borderBottomRightRadius },
+            { "border-left-color", borderLeftColor },
+            { "border-right-color", borderRightColor },
+            { "border-top-color", borderTopColor },
+            { "border-bottom-color", borderBottomColor },
+            { "border-left-style", borderLeftStyle },
+            { "border-right-style", borderRightStyle},
+            { "border-top-style", borderTopStyle},
+            { "border-bottom-style", borderBottomStyle},
+            { "border-inline-start-color", borderInlineStartColor },
+            { "border-inline-end-color", borderInlineEndColor },
+            { "border-block-start-color", borderTopColor },
+            { "border-block-end-color", borderBottomColor },
+            { "border-inline-start-style", borderInlineStartStyle },
+            { "border-inline-end-style", borderInlineEndStyle },
+            { "border-block-start-style", borderTopStyle },
+            { "border-block-end-style", borderBottomStyle },
+            { "border-start-start-radius", borderStartStartRadius },
+            { "border-start-end-radius", borderStartEndRadius },
+            { "border-end-start-radius", borderEndStartRadius },
+            { "border-end-end-radius", borderEndEndRadius },
+            { "outline-offset", outlineOffset },
+            { "outline-width", outlineWidth },
+            { "outline-color", outlineColor },
+            { "outline-style", outlineStyle },
+            { "box-shadow", boxShadow },
+            { "transform-origin", transformOrigin },
+            { "perspective-origin", perspectiveOrigin },
+            { "backface-visibility", backfaceVisibility },
+            { "translate-z", translateZ },
+            { "font-family", fontFamily },
+            { "font-weight", fontWeight },
+            { "font-style", fontStyle },
+            { "text-transform", textTransform },
+            { "font-size", fontSize },
+            { "line-height", lineHeight },
+            { "letter-spacing", letterSpacing },
+            { "word-spacing", wordSpacing },
+            { "text-align", textAlign },
+            { "vertical-align", verticalAlign },
+            { "text-overflow", textOverflow },
+            { "text-wrap", whiteSpace },
+            { "text-decoration-line", fontStyle },
+            { "text-decoration-color", textDecorationColor },
+            { "font-variant", textTransform },
+            { "font-variant-caps", textTransform },
+            { "text-shadow", textShadow },
+            { "caret-color", caretColor },
+            { "overflow-x", overflowX },
+            { "overflow-y", overflowY },
+            { "max-lines", maxLines },
+            { "line-clamp", maxLines },
+            { "text-stroke-color", textStrokeColor },
+            { "text-stroke-width", textStrokeWidth },
+            { "white-space", whiteSpace },
+            { "object-fit", objectFit },
+            { "object-position", objectPosition },
+            { "state-duration", stateDuration },
+        };
+
+        /// <summary>
+        /// The inline-axis logical property that stands in for each physical one, left-to-right first
+        /// and right-to-left second -- so the pair is already swapped for the caller and an index of
+        /// <c>isRtl ? 1 : 0</c> picks the one that applies. <see cref="NodeStyle.ResolveLogical"/> is
+        /// what reads it, and everything that wants the physical property has to go through there.
+        /// </summary>
+        /// <remarks>
+        /// Only the inline axis needs this. The block-axis spellings are aliases in the map above,
+        /// because with no <c>writing-mode</c> here block-start is always the top.
+        /// </remarks>
+        internal static readonly Dictionary<IStyleProperty, IStyleProperty[]> InlineCounterparts = new Dictionary<IStyleProperty, IStyleProperty[]>
+        {
+            { borderLeftColor, new IStyleProperty[] { borderInlineStartColor, borderInlineEndColor } },
+            { borderRightColor, new IStyleProperty[] { borderInlineEndColor, borderInlineStartColor } },
+            { borderLeftStyle, new IStyleProperty[] { borderInlineStartStyle, borderInlineEndStyle } },
+            { borderRightStyle, new IStyleProperty[] { borderInlineEndStyle, borderInlineStartStyle } },
+            { borderTopLeftRadius, new IStyleProperty[] { borderStartStartRadius, borderStartEndRadius } },
+            { borderTopRightRadius, new IStyleProperty[] { borderStartEndRadius, borderStartStartRadius } },
+            { borderBottomLeftRadius, new IStyleProperty[] { borderEndStartRadius, borderEndEndRadius } },
+            { borderBottomRightRadius, new IStyleProperty[] { borderEndEndRadius, borderEndStartRadius } },
+            { scrollPaddingLeft, new IStyleProperty[] { scrollPaddingInlineStart, scrollPaddingInlineEnd } },
+            { scrollPaddingRight, new IStyleProperty[] { scrollPaddingInlineEnd, scrollPaddingInlineStart } },
+            { scrollMarginLeft, new IStyleProperty[] { scrollMarginInlineStart, scrollMarginInlineEnd } },
+            { scrollMarginRight, new IStyleProperty[] { scrollMarginInlineEnd, scrollMarginInlineStart } },
+        };
+    }
+}

@@ -1,0 +1,421 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using ReactUnity.Helpers;
+using ReactUnity.Styling.Computed;
+
+namespace ReactUnity.Styling.Converters
+{
+    internal static class ParserHelpers
+    {
+        public static HashSet<string> AllowedFunctionsVariables = new HashSet<string> { "var" };
+        public static Regex FunctionRegex = new Regex(@"^([\w\d-]+)\(([\s\w\d\.,/%#_:;+""\'\`\(\)-]*)\)$", RegexOptions.IgnoreCase);
+
+        public static (string, string[], string) ParseFunction(string val)
+        {
+            if (string.IsNullOrWhiteSpace(val)) return default;
+            val = val.Trim();
+
+            var name = new StringBuilder();
+            var args = new StringBuilder();
+            var len = val.Length;
+            var parensStack = 0;
+            var hasParens = false;
+
+            for (int i = 0; i < len; i++)
+            {
+                var c = val[i];
+
+                if (c == '(')
+                {
+                    parensStack++;
+                    hasParens = true;
+
+                    if (parensStack > 1) args.Append(c);
+                    else if (name.Length == 0) return default;
+                }
+                else if (c == ')')
+                {
+                    parensStack--;
+
+                    if (parensStack < 0) return default;
+                    else if (parensStack > 0) args.Append(c);
+                    else
+                    {
+                        if (i == len - 1) break;
+                        else return (null, null, null);
+                    }
+                }
+                else if (parensStack == 0)
+                {
+                    if (char.IsWhiteSpace(c)) return default;
+                    name.Append(c);
+                }
+                else args.Append(c);
+            }
+
+            if (!hasParens) return default;
+
+            var argsCombined = args.ToString();
+            var splits = SplitComma(argsCombined);
+
+            if (splits.Count == 1 && splits[0] == "") return (name.ToString(), new string[] { }, argsCombined);
+            else return (name.ToString(), splits.ToArray(), argsCombined);
+        }
+
+
+        public static bool TryParseVariables(string val, out IComputedValue result)
+        {
+            result = null;
+            if (string.IsNullOrWhiteSpace(val)) return false;
+            // Only a lowercase `var` is taken below, and most values have none to find.
+            if (val.IndexOf("var", System.StringComparison.Ordinal) < 0) return false;
+
+            val = val.Trim();
+
+            var isWholeVariable = CssFunctions.TryCall(val, out var wholeParseResult, AllowedFunctionsVariables);
+            if (isWholeVariable && wholeParseResult is ComputedVariable wholeVr)
+            {
+                result = wholeVr;
+                return true;
+            }
+
+            var acc = new StringBuilder();
+            var name = new StringBuilder();
+            var args = new StringBuilder();
+            var len = val.Length;
+            var parensStack = 0;
+            var hasParens = false;
+            var isVariable = false;
+
+            var templates = new List<string>();
+            var variables = new List<ComputedVariable>();
+
+            for (int i = 0; i < len; i++)
+            {
+                var c = val[i];
+
+                if (c == '(')
+                {
+                    if (parensStack >= 1)
+                    {
+                        args.Append(c);
+                        parensStack++;
+                    }
+                    else if (name.ToString() == "var")
+                    {
+                        isVariable = true;
+                        hasParens = true;
+
+                        parensStack++;
+
+                        templates.Add(acc.ToString());
+                        acc.Clear();
+                        acc.Append(name);
+                        acc.Append(c);
+                        name.Clear();
+                    }
+                    else
+                    {
+                        acc.Append(name.ToString());
+                        acc.Append(c);
+                        name.Clear();
+                    }
+                }
+                else if (isVariable && c == ')')
+                {
+                    parensStack--;
+
+                    if (parensStack < 0) return false;
+                    else if (parensStack > 0) args.Append(c);
+                    else
+                    {
+                        isVariable = false;
+
+                        acc.Append(args);
+                        acc.Append(c);
+                        var parsed = CssFunctions.TryCall(acc.ToString(), out var parseResult, AllowedFunctionsVariables);
+                        if (parsed && parseResult is ComputedVariable vr) variables.Add(vr);
+                        else return false;
+
+                        acc.Clear();
+                        args.Clear();
+                    }
+                }
+                else if (parensStack == 0)
+                {
+                    if (!char.IsLetter(c))
+                    {
+                        acc.Append(name.ToString());
+                        acc.Append(c);
+                        name.Clear();
+                    }
+                    else name.Append(c);
+                }
+                else args.Append(c);
+            }
+
+            acc.Append(name.ToString());
+
+            templates.Add(acc.ToString());
+
+            if (!hasParens || isVariable || parensStack > 0) return false;
+
+            result = new ComputedStringTemplate(templates, variables);
+            return true;
+        }
+
+        /// <summary>
+        /// Drops the `in oklab` (or `in oklch longer hue`) interpolation hint from a gradient's first
+        /// argument. Ramps interpolate in one space on the GPU, so the hint is accepted and ignored.
+        /// </summary>
+        public static string StripColorInterpolationMethod(string val, out bool found)
+        {
+            val = val.Trim();
+            var index = val.FastStartsWith("in ") ? 0 : val.IndexOf(" in ", StringComparison.Ordinal);
+            found = index >= 0;
+            return found ? val.Substring(0, index).Trim() : val;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static List<string> SplitComma(string val) => Split(val, ',');
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static List<string> SplitSlash(string val) => Split(val, '/');
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static List<string> SplitWhitespace(string val, char isolateCharacter = default) => Split(val, ' ', isolateCharacter);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static List<string> SplitShorthand(string val) => Split(val, ' ', '/');
+
+        /// <summary>
+        /// Splits a list of function calls, which is what a `filter` value is. The whitespace
+        /// between two calls is optional in CSS and a minifier drops it, so `grayscale()blur(2px)`
+        /// is two calls -- splitting on whitespace made it one token naming no function at all.
+        /// </summary>
+        public static List<string> SplitFunctionList(string val)
+        {
+            var list = new List<string>();
+            if (string.IsNullOrWhiteSpace(val)) return list;
+
+            var acc = new StringBuilder();
+            var parensStack = 0;
+
+            var len = val.Length;
+            for (int i = 0; i < len; i++)
+            {
+                var c = val[i];
+
+                if (parensStack == 0 && char.IsWhiteSpace(c))
+                {
+                    if (acc.Length > 0)
+                    {
+                        list.Add(acc.ToString());
+                        acc.Clear();
+                    }
+                    continue;
+                }
+
+                acc.Append(c);
+
+                if (c == '(') parensStack++;
+                else if (c == ')')
+                {
+                    // Clamped rather than allowed to go negative, so a stray `)` cannot swallow
+                    // the calls after it by leaving the depth wrong for the rest of the value.
+                    if (parensStack > 0) parensStack--;
+
+                    if (parensStack == 0)
+                    {
+                        list.Add(acc.ToString());
+                        acc.Clear();
+                    }
+                }
+            }
+
+            if (acc.Length > 0) list.Add(acc.ToString());
+
+            return list;
+        }
+
+        public static List<string> Split(string val, char separator, char isolateCharacter = default)
+        {
+            var acc = new StringBuilder();
+            var spaces = new StringBuilder();
+            var list = new List<string>();
+            var len = val.Length;
+            var parensStack = 0;
+
+            for (int i = 0; i < len; i++)
+            {
+                var c = val[i];
+
+                if (c == '(') parensStack++;
+
+                if (parensStack == 0 && c == separator)
+                {
+                    if (!char.IsWhiteSpace(c) || acc.Length > 0)
+                    {
+                        list.Add(acc.ToString());
+                        acc.Clear();
+                        spaces.Clear();
+                    }
+                }
+                else if (parensStack == 0 && char.IsWhiteSpace(c))
+                {
+                    if (acc.Length > 0) spaces.Append(c);
+                }
+                else if (parensStack == 0 && c == isolateCharacter)
+                {
+                    if (acc.Length > 0) list.Add(acc.ToString());
+                    acc.Clear();
+                    spaces.Clear();
+                    list.Add(c.ToString());
+                }
+                else
+                {
+                    if (spaces.Length > 0)
+                    {
+                        acc.Append(spaces);
+                        spaces.Clear();
+                    }
+                    acc.Append(c);
+                    if (c == ')') parensStack--;
+                }
+            }
+
+            if (!char.IsWhiteSpace(separator) || acc.Length > 0)
+                list.Add(acc.ToString());
+
+            return list;
+        }
+
+        public delegate object ColorCallback(float v1, float v2, float v3, float v4);
+
+        /// <summary>The channel converters of `rgb()`: three 0..255 values and an alpha.</summary>
+        public static readonly List<StyleConverterBase> RgbConverters = new List<StyleConverterBase> {
+            AllConverters.ColorValueConverter,
+            AllConverters.ColorValueConverter,
+            AllConverters.ColorValueConverter,
+            AllConverters.PercentageConverter,
+        };
+
+        /// <summary>The channel converters of `hsl()` and `hsv()`: an angle, two 0..100 values and an alpha.</summary>
+        public static readonly List<StyleConverterBase> HslConverters = new List<StyleConverterBase> {
+            AllConverters.AngleConverter,
+            AllConverters.HslPercentageConverter,
+            AllConverters.HslPercentageConverter,
+            AllConverters.PercentageConverter,
+        };
+
+        public static bool ParseCommaSeparatedColor(string[] vals, ColorCallback callback, bool hsl, out IComputedValue result)
+            => ParseCommaSeparatedColor(vals, callback, hsl ? HslConverters : RgbConverters, out result);
+
+        /// <summary>A channel written as `none` is a missing component, which resolves to zero.</summary>
+        public static string[] ReplaceNone(IList<string> vals)
+        {
+            var result = new string[vals.Count];
+            for (int i = 0; i < vals.Count; i++)
+            {
+                var val = vals[i]?.Trim();
+                result[i] = string.Equals(val, "none", StringComparison.OrdinalIgnoreCase) ? "0" : val;
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Builds a color out of 3 channels plus an optional alpha, each parsed by its own converter.
+        /// Stays lazy when a channel is a var(), which is why colors are not parsed eagerly here.
+        /// </summary>
+        public static bool ParseCommaSeparatedColor(string[] vals, ColorCallback callback, List<StyleConverterBase> converters, out IComputedValue result)
+        {
+            if (vals.Length != 3 && vals.Length != 4)
+            {
+                result = null;
+                return false;
+            }
+
+            return ComputedCompound.Create(
+                out result,
+                ReplaceNone(vals).OfType<object>().ToList(),
+                converters,
+                (resolved) => {
+                    if (resolved[0] is float r && resolved[1] is float g && resolved[2] is float b)
+                    {
+                        if (!(resolved.Count > 3 && resolved[3] is float a)) a = 1;
+                        return callback(r, g, b, a);
+                    }
+                    return null;
+                });
+        }
+
+        public static bool ParseSpaceSeparatedColor(string val, ColorCallback callback, bool hsl, out IComputedValue result)
+        {
+            var vals = ParseSpaceSeparatedColorArguments(val);
+            return ParseCommaSeparatedColor(vals.ToArray(), callback, hsl, out result);
+        }
+
+        public static bool ParseSpaceSeparatedColor(string val, ColorCallback callback, List<StyleConverterBase> converters, out IComputedValue result)
+        {
+            var vals = ParseSpaceSeparatedColorArguments(val);
+            return ParseCommaSeparatedColor(vals.ToArray(), callback, converters, out result);
+        }
+
+
+        public static List<string> ParseSpaceSeparatedColorArguments(string val)
+        {
+            // Paren-aware, so the slash in calc(180 / 2) is not mistaken for the alpha separator.
+            var alphaSplit = SplitSlash(val);
+            var vals = SplitWhitespace(alphaSplit[0]);
+            for (int i = 1; i < alphaSplit.Count; i++) vals.Add(alphaSplit[i].Trim());
+            return vals;
+        }
+
+
+        // Every value parsed asks, and Enum.TryParse reflects over the enum each time under Mono.
+        private static readonly Dictionary<string, CssKeyword> KeywordNames = BuildKeywordNames();
+
+        private static Dictionary<string, CssKeyword> BuildKeywordNames()
+        {
+            var names = new Dictionary<string, CssKeyword>(StringComparer.OrdinalIgnoreCase);
+            foreach (CssKeyword keyword in Enum.GetValues(typeof(CssKeyword)))
+                if (keyword != CssKeyword.NoKeyword) names[keyword.ToString()] = keyword;
+            names["revert-layer"] = CssKeyword.RevertLayer;
+            return names;
+        }
+
+        public static bool TryParseKeyword(string value, out CssKeyword keyword)
+        {
+            // Enum.TryParse ORs a comma list together, which only the slow path below reproduces.
+            if (value != null && value.IndexOf(',') < 0)
+            {
+                if (!KeywordNames.TryGetValue(value.Trim(), out keyword)) keyword = CssKeyword.NoKeyword;
+                return keyword != CssKeyword.NoKeyword;
+            }
+
+            if (value == null || int.TryParse(value, out _))
+            {
+                keyword = CssKeyword.NoKeyword;
+                return false;
+            }
+
+            // The one keyword whose name is not something the enum can spell.
+            if (value.Equals("revert-layer", StringComparison.OrdinalIgnoreCase))
+            {
+                keyword = CssKeyword.RevertLayer;
+                return true;
+            }
+
+            var parsed = Enum.TryParse(value, true, out keyword);
+            if (parsed && Enum.IsDefined(typeof(CssKeyword), keyword) && keyword != CssKeyword.NoKeyword)
+                return true;
+
+            keyword = CssKeyword.NoKeyword;
+            return false;
+        }
+    }
+}

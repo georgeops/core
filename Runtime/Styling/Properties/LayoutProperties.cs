@@ -1,0 +1,278 @@
+using System;
+using System.Collections.Generic;
+using ReactUnity.Styling.Computed;
+using ReactUnity.Styling.Converters;
+using ReactUnity.Types;
+using Yoga;
+
+namespace ReactUnity.Styling
+{
+    public static class LayoutProperties
+    {
+        public static readonly LayoutProperty<YogaDirection> StyleDirection = new LayoutProperty<YogaDirection>("StyleDirection");
+        public static readonly LayoutProperty<YogaFlexDirection> FlexDirection = new LayoutProperty<YogaFlexDirection>("FlexDirection", new DisplayFlexDirection());
+        // The web's spellings of what Yoga calls flex-start and flex-end, and the fallback positions
+        // it has no value for. `normal` behaves as stretch on the align axis and as start on justify.
+        public static readonly StyleConverterBase AlignConverter = new EnumConverter(typeof(YogaAlign), false, true, new Dictionary<string, object>
+        {
+            { "start", YogaAlign.FlexStart },
+            { "end", YogaAlign.FlexEnd },
+            { "selfstart", YogaAlign.FlexStart },
+            { "selfend", YogaAlign.FlexEnd },
+            { "left", YogaAlign.FlexStart },
+            { "right", YogaAlign.FlexEnd },
+            { "normal", YogaAlign.Stretch },
+            { "firstbaseline", YogaAlign.Baseline },
+            { "lastbaseline", YogaAlign.Baseline },
+        });
+        public static readonly StyleConverterBase JustifyConverter = new EnumConverter(typeof(YogaJustify), false, true, new Dictionary<string, object>
+        {
+            { "start", YogaJustify.FlexStart },
+            { "end", YogaJustify.FlexEnd },
+            { "left", YogaJustify.FlexStart },
+            { "right", YogaJustify.FlexEnd },
+            { "normal", YogaJustify.FlexStart },
+            { "stretch", YogaJustify.FlexStart },
+        });
+        // Spelled out because Yoga's zero is `Auto` now, not `FlexStart`.
+        public static readonly LayoutProperty<YogaJustify> JustifyContent = new LayoutProperty<YogaJustify>("JustifyContent", defaultValue: YogaJustify.FlexStart, converter: JustifyConverter);
+        // The web's other spellings of the two layouts that exist here: a block stacks, a flex box is a row.
+        public static readonly StyleConverterBase DisplayConverter = new EnumConverter(typeof(DisplayType), false, true, new Dictionary<string, object>
+        {
+            { "inline", DisplayType.Block },
+            { "inlineblock", DisplayType.Block },
+            { "flowroot", DisplayType.Block },
+            { "inlineflex", DisplayType.Flex },
+        });
+        public static readonly LayoutProperty<DisplayType> Display = new LayoutProperty<DisplayType>("Display", converter: DisplayConverter);
+
+        // Unset, flex-direction follows display as on the web: a flex box is a row and a block stacks.
+        private class DisplayFlexDirection : IComputedValue
+        {
+            public object GetValue(IStyleProperty prop, NodeStyle style, IStyleConverter converter) =>
+                style.GetStyleValue(Display, true) == DisplayType.Flex ? YogaFlexDirection.Row : YogaFlexDirection.Column;
+        }
+        public static readonly LayoutProperty<YogaBoxSizing> BoxSizing = new LayoutProperty<YogaBoxSizing>("BoxSizing");
+        public static readonly LayoutProperty<YogaAlign> AlignItems = new LayoutProperty<YogaAlign>("AlignItems", converter: AlignConverter);
+        public static readonly LayoutProperty<YogaAlign> AlignSelf = new LayoutProperty<YogaAlign>("AlignSelf", converter: AlignConverter);
+        public static readonly LayoutProperty<YogaAlign> AlignContent = new LayoutProperty<YogaAlign>("AlignContent", converter: AlignConverter);
+        public static readonly LayoutProperty<YogaWrap> Wrap = new LayoutProperty<YogaWrap>("Wrap");
+        // Yoga's enum has no `auto` -- which is a scroll container that may not need to scroll -- and no `clip`.
+        public static readonly StyleConverterBase OverflowConverter = new EnumConverter(typeof(YogaOverflow), false, true, new Dictionary<string, object>
+        {
+            { "auto", YogaOverflow.Scroll },
+            { "clip", YogaOverflow.Hidden },
+        });
+        public static readonly LayoutProperty<YogaOverflow> Overflow = new LayoutProperty<YogaOverflow>("Overflow", converter: OverflowConverter);
+
+        /// <summary>
+        /// The one overflow Yoga gets from two axes: scroll on either beats hidden, which beats visible.
+        /// </summary>
+        public static YogaOverflow CombineOverflow(YogaOverflow a, YogaOverflow b)
+        {
+            if (a == YogaOverflow.Scroll || b == YogaOverflow.Scroll) return YogaOverflow.Scroll;
+            if (a == YogaOverflow.Hidden || b == YogaOverflow.Hidden) return YogaOverflow.Hidden;
+            return YogaOverflow.Visible;
+        }
+        public static readonly LayoutProperty<float> AspectRatio = new LayoutProperty<float>("AspectRatio", true, float.NaN);
+        public static readonly LayoutProperty<float> FlexGrow = new LayoutProperty<float>("FlexGrow", true, float.NaN);
+        public static readonly LayoutProperty<float> FlexShrink = new LayoutProperty<float>("FlexShrink", true, 1f);
+        public static readonly LayoutProperty<YogaValue> FlexBasis = new LayoutProperty<YogaValue>("FlexBasis", true);
+        public static readonly LayoutProperty<YogaValue> Width = new LayoutProperty<YogaValue>("Width", true);
+        public static readonly LayoutProperty<YogaValue> Height = new LayoutProperty<YogaValue>("Height", true);
+        public static readonly LayoutProperty<YogaValue> MinWidth = new LayoutProperty<YogaValue>("MinWidth", true);
+        public static readonly LayoutProperty<YogaValue> MinHeight = new LayoutProperty<YogaValue>("MinHeight", true);
+        public static readonly LayoutProperty<YogaValue> MaxWidth = new LayoutProperty<YogaValue>("MaxWidth", true);
+        public static readonly LayoutProperty<YogaValue> MaxHeight = new LayoutProperty<YogaValue>("MaxHeight", true);
+        public static readonly LayoutProperty<YogaValue> Left = new LayoutProperty<YogaValue>("Left", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> Right = new LayoutProperty<YogaValue>("Right", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> Top = new LayoutProperty<YogaValue>("Top", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> Bottom = new LayoutProperty<YogaValue>("Bottom", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> Start = new LayoutProperty<YogaValue>("Start", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> End = new LayoutProperty<YogaValue>("End", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> Margin = new LayoutProperty<YogaValue>("Margin", true);
+        public static readonly LayoutProperty<YogaValue> MarginLeft = new LayoutProperty<YogaValue>("MarginLeft", true);
+        public static readonly LayoutProperty<YogaValue> MarginRight = new LayoutProperty<YogaValue>("MarginRight", true);
+        public static readonly LayoutProperty<YogaValue> MarginTop = new LayoutProperty<YogaValue>("MarginTop", true);
+        public static readonly LayoutProperty<YogaValue> MarginBottom = new LayoutProperty<YogaValue>("MarginBottom", true);
+        public static readonly LayoutProperty<YogaValue> MarginStart = new LayoutProperty<YogaValue>("MarginStart", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> MarginEnd = new LayoutProperty<YogaValue>("MarginEnd", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> MarginHorizontal = new LayoutProperty<YogaValue>("MarginHorizontal", true);
+        public static readonly LayoutProperty<YogaValue> MarginVertical = new LayoutProperty<YogaValue>("MarginVertical", true);
+        public static readonly LayoutProperty<YogaValue> Padding = new LayoutProperty<YogaValue>("Padding", true);
+        public static readonly LayoutProperty<YogaValue> PaddingLeft = new LayoutProperty<YogaValue>("PaddingLeft", true);
+        public static readonly LayoutProperty<YogaValue> PaddingRight = new LayoutProperty<YogaValue>("PaddingRight", true);
+        public static readonly LayoutProperty<YogaValue> PaddingTop = new LayoutProperty<YogaValue>("PaddingTop", true);
+        public static readonly LayoutProperty<YogaValue> PaddingBottom = new LayoutProperty<YogaValue>("PaddingBottom", true);
+        public static readonly LayoutProperty<YogaValue> PaddingStart = new LayoutProperty<YogaValue>("PaddingStart", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> PaddingEnd = new LayoutProperty<YogaValue>("PaddingEnd", true, YogaValue.Undefined());
+        public static readonly LayoutProperty<YogaValue> PaddingHorizontal = new LayoutProperty<YogaValue>("PaddingHorizontal", true);
+        public static readonly LayoutProperty<YogaValue> PaddingVertical = new LayoutProperty<YogaValue>("PaddingVertical", true);
+        public static readonly LayoutProperty<float> BorderWidth = new LayoutProperty<float>("BorderWidth", true, converter: AllConverters.LengthConverter);
+        public static readonly LayoutProperty<float> BorderLeftWidth = new LayoutProperty<float>("BorderLeftWidth", true, converter: AllConverters.LengthConverter);
+        public static readonly LayoutProperty<float> BorderRightWidth = new LayoutProperty<float>("BorderRightWidth", true, converter: AllConverters.LengthConverter);
+        public static readonly LayoutProperty<float> BorderTopWidth = new LayoutProperty<float>("BorderTopWidth", true, converter: AllConverters.LengthConverter);
+        public static readonly LayoutProperty<float> BorderBottomWidth = new LayoutProperty<float>("BorderBottomWidth", true, converter: AllConverters.LengthConverter);
+        public static readonly LayoutProperty<float> BorderStartWidth = new LayoutProperty<float>("BorderStartWidth", true, float.NaN, AllConverters.LengthConverter);
+        public static readonly LayoutProperty<float> BorderEndWidth = new LayoutProperty<float>("BorderEndWidth", true, float.NaN, AllConverters.LengthConverter);
+        public static readonly LayoutProperty<int> Order = new LayoutProperty<int>("order", true);
+
+        public static readonly LayoutProperty<YogaValue> RowGap = new LayoutProperty<YogaValue>("RowGap", true);
+        public static readonly LayoutProperty<YogaValue> ColumnGap = new LayoutProperty<YogaValue>("ColumnGap", true);
+
+        public static Dictionary<string, ILayoutProperty> PropertyMap = new Dictionary<string, ILayoutProperty>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "flexDirection", FlexDirection },
+            { "justifyContent", JustifyContent },
+            { "display", Display },
+            { "boxSizing", BoxSizing },
+            { "alignItems", AlignItems },
+            { "alignSelf", AlignSelf },
+            { "alignContent", AlignContent },
+            { "overflow", Overflow },
+            { "aspectRatio", AspectRatio },
+            { "flexGrow", FlexGrow },
+            { "flexShrink", FlexShrink },
+            { "flexBasis", FlexBasis },
+            { "width", Width },
+            { "height", Height },
+            { "minWidth", MinWidth },
+            { "minHeight", MinHeight },
+            { "maxWidth", MaxWidth },
+            { "maxHeight", MaxHeight },
+            { "left", Left },
+            { "right", Right },
+            { "top", Top },
+            { "bottom", Bottom },
+            { "start", Start },
+            { "end", End },
+            { "margin", Margin },
+            { "marginLeft", MarginLeft },
+            { "marginRight", MarginRight },
+            { "marginTop", MarginTop },
+            { "marginBottom", MarginBottom },
+            { "marginStart", MarginStart },
+            { "marginEnd", MarginEnd },
+            { "marginHorizontal", MarginHorizontal },
+            { "marginVertical", MarginVertical },
+            { "padding", Padding },
+            { "paddingLeft", PaddingLeft },
+            { "paddingRight", PaddingRight },
+            { "paddingTop", PaddingTop },
+            { "paddingBottom", PaddingBottom },
+            { "paddingStart", PaddingStart },
+            { "paddingEnd", PaddingEnd },
+            { "paddingHorizontal", PaddingHorizontal },
+            { "paddingVertical", PaddingVertical },
+            { "borderWidth", BorderWidth },
+            { "borderLeftWidth", BorderLeftWidth },
+            { "borderRightWidth", BorderRightWidth },
+            { "borderTopWidth", BorderTopWidth },
+            { "borderBottomWidth", BorderBottomWidth },
+            { "borderStartWidth", BorderStartWidth },
+            { "borderEndWidth", BorderEndWidth },
+            { "order", Order },
+            { "rowGap", RowGap },
+            { "columnGap", ColumnGap },
+
+            { "box-sizing", BoxSizing },
+            { "flex-direction", FlexDirection },
+            { "justify-content", JustifyContent },
+            { "align-items", AlignItems },
+            { "align-self", AlignSelf },
+            { "align-content", AlignContent },
+            { "aspect-ratio", AspectRatio },
+            { "flex-grow", FlexGrow },
+            { "flex-shrink", FlexShrink },
+            { "flex-basis", FlexBasis },
+            { "min-width", MinWidth },
+            { "min-height", MinHeight },
+            { "max-width", MaxWidth },
+            { "max-height", MaxHeight },
+            { "margin-left", MarginLeft },
+            { "margin-right", MarginRight },
+            { "margin-top", MarginTop },
+            { "margin-bottom", MarginBottom },
+            { "margin-start", MarginStart },
+            { "margin-end", MarginEnd },
+            { "margin-horizontal", MarginHorizontal },
+            { "margin-vertical", MarginVertical },
+            { "padding-left", PaddingLeft },
+            { "padding-right", PaddingRight },
+            { "padding-top", PaddingTop },
+            { "padding-bottom", PaddingBottom },
+            { "padding-start", PaddingStart },
+            { "padding-end", PaddingEnd },
+            { "padding-horizontal", PaddingHorizontal },
+            { "padding-vertical", PaddingVertical },
+            { "border-width", BorderWidth },
+            { "border-left-width", BorderLeftWidth },
+            { "border-right-width", BorderRightWidth },
+            { "border-top-width", BorderTopWidth },
+            { "border-bottom-width", BorderBottomWidth },
+            { "border-start-width", BorderStartWidth },
+            { "border-end-width", BorderEndWidth },
+            { "row-gap", RowGap },
+            { "column-gap", ColumnGap },
+
+            { "direction", StyleDirection },
+            { "flex-wrap", Wrap },
+            { "flexWrap", Wrap },
+
+            // CSS logical properties. The inline axis lands on Yoga's Start and End edges, which
+            // Yoga resolves against the direction a node inherits -- so `direction: rtl` on any
+            // ancestor flips them, and nothing here has to track that itself. The block axis is
+            // always vertical: `writing-mode` does not exist here, so block-start is top.
+            { "padding-inline-start", PaddingStart },
+            { "padding-inline-end", PaddingEnd },
+            { "padding-block-start", PaddingTop },
+            { "padding-block-end", PaddingBottom },
+            { "margin-inline-start", MarginStart },
+            { "margin-inline-end", MarginEnd },
+            { "margin-block-start", MarginTop },
+            { "margin-block-end", MarginBottom },
+            { "inset-inline-start", Start },
+            { "inset-inline-end", End },
+            { "inset-block-start", Top },
+            { "inset-block-end", Bottom },
+            { "border-inline-start-width", BorderStartWidth },
+            { "border-inline-end-width", BorderEndWidth },
+            { "border-block-start-width", BorderTopWidth },
+            { "border-block-end-width", BorderBottomWidth },
+
+            // The logical sizing properties are plain aliases, unlike the edges above: which axis is
+            // inline is `writing-mode`'s to decide and not `direction`'s, so with no writing-mode here
+            // the inline axis is always horizontal. `direction: rtl` does not swap these.
+            { "inline-size", Width },
+            { "block-size", Height },
+            { "min-inline-size", MinWidth },
+            { "min-block-size", MinHeight },
+            { "max-inline-size", MaxWidth },
+            { "max-block-size", MaxHeight },
+
+            { "paddingInlineStart", PaddingStart },
+            { "paddingInlineEnd", PaddingEnd },
+            { "paddingBlockStart", PaddingTop },
+            { "paddingBlockEnd", PaddingBottom },
+            { "marginInlineStart", MarginStart },
+            { "marginInlineEnd", MarginEnd },
+            { "marginBlockStart", MarginTop },
+            { "marginBlockEnd", MarginBottom },
+            { "insetInlineStart", Start },
+            { "insetInlineEnd", End },
+            { "insetBlockStart", Top },
+            { "insetBlockEnd", Bottom },
+            { "borderInlineStartWidth", BorderStartWidth },
+            { "borderInlineEndWidth", BorderEndWidth },
+            { "borderBlockStartWidth", BorderTopWidth },
+            { "borderBlockEndWidth", BorderBottomWidth },
+
+            { "inlineSize", Width },
+            { "blockSize", Height },
+            { "minInlineSize", MinWidth },
+            { "minBlockSize", MinHeight },
+            { "maxInlineSize", MaxWidth },
+            { "maxBlockSize", MaxHeight },
+        };
+    }
+}

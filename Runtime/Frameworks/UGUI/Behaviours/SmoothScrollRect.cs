@@ -1,0 +1,504 @@
+using System;
+using System.Collections;
+using ReactUnity.Helpers;
+using ReactUnity.Types;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+
+namespace ReactUnity.UGUI.Behaviours
+{
+    /// <summary>
+    /// Version of <see cref="ScrollRect"/> that supports smooth scrolling.
+    /// </summary>
+    public class SmoothScrollRect : ScrollRect
+    {
+        public float Smoothness { get; set; } = 0.12f;
+
+        /// <summary><c>scroll-behavior: smooth</c>: animate the scrolls this rect is asked to make.</summary>
+        public bool SmoothBehavior { get; set; }
+
+        /// <summary>How long one of those takes. Longer than the wheel's, which follows a live gesture.</summary>
+        public float BehaviorSmoothness { get; set; } = 0.3f;
+
+        /// <summary><c>overscroll-behavior-x</c>: whether a sideways scroll this rect has no room for
+        /// goes on to the box above it.</summary>
+        public OverscrollBehavior OverscrollX { get; set; } = OverscrollBehavior.Auto;
+
+        /// <summary><c>overscroll-behavior-y</c>, the same for the other axis.</summary>
+        public OverscrollBehavior OverscrollY { get; set; } = OverscrollBehavior.Auto;
+
+        /// <summary>
+        /// The element this rect scrolls. Chaining walks the element tree rather than the transforms,
+        /// which a <c>filter</c> or a <c>perspective</c> above this one has reparented elsewhere.
+        /// </summary>
+        public ScrollComponent Component { get; internal set; }
+
+        /// <summary>
+        /// Where the scroll should come to rest, given where the gesture set off from and where it is
+        /// heading, in <see cref="ScrollLeft"/> and <see cref="ScrollTop"/> points -- or null when
+        /// nothing snaps. A rect cannot answer this itself, the snap targets being elements, so the
+        /// component fills it in.
+        /// </summary>
+        public Func<Vector2, Vector2, Vector2?> FindSnapTarget { get; set; }
+
+        private Coroutine SmoothCoroutine;
+        private Vector2 targetPosition;
+        private RectTransform rt;
+        private RectTransform RT => rt ?? (rt = GetComponent<RectTransform>());
+
+        private bool dragging;
+        private bool snapPending;
+        private bool snapInstantly;
+
+        /// The box this drag was handed to, once it was. A gesture stays with whichever box took it,
+        /// rather than coming back the moment that one reaches its own end.
+        private SmoothScrollRect chainedTo;
+
+        /// Where this box stood when the drag began, which is what says whether it has moved at all --
+        /// a slow drag covers less than a pixel a frame without being stuck.
+        private Vector2 dragOrigin;
+
+        /// Where the pointer was then, in the same space the base class measures it in, so the two can
+        /// be compared: what the gesture asked for against what the box took.
+        private Vector2 dragStartCursor;
+
+        /// Where the gesture now settling set off from, which is all `scroll-snap-stop: always` needs:
+        /// a snap point counts as passed over when it lies between this and where the scroll is headed.
+        private Vector2 snapOrigin;
+
+        /// How fast the running animation is moving, in normalized position per second.
+        private Vector2 smoothVelocity;
+
+        /// Whether the running animation is following a target that can still move, rather than
+        /// carrying the scroll to one it was given.
+        private bool tracking;
+
+        /// How much of the distance a follow still has left once <see cref="Smoothness"/> has passed,
+        /// which is what keeps that number meaning about how long a scroll takes.
+        private const float FollowRemainder = 0.05f;
+
+        public bool WheelDirectionTransposed { get; set; } = false;
+
+        public float ClientWidth => RT.rect.width;
+        public float ClientHeight => RT.rect.height;
+        public float ScrollWidth => Mathf.Max(content.rect.width, ClientWidth);
+        public float ScrollHeight => Mathf.Max(content.rect.height, ClientHeight);
+
+        // These two jump unless `scroll-behavior` asked for an animation, which is where CSS puts the
+        // decision: assigning `scrollTop` is an asked-for scroll, not a gesture.
+        public float ScrollLeft
+        {
+            get => normalizedPosition.x * (ScrollWidth - ClientWidth);
+            set => ScrollTo(value, null, SmoothBehavior ? BehaviorSmoothness : 0f);
+        }
+
+        public float ScrollTop
+        {
+            get => (1 - normalizedPosition.y) * (ScrollHeight - ClientHeight);
+            set => ScrollTo(null, value, SmoothBehavior ? BehaviorSmoothness : 0f);
+        }
+
+        public override void OnScroll(PointerEventData data)
+        {
+            if (!IsActive())
+                return;
+
+            var transpose = WheelDirectionTransposed;
+
+#if ENABLE_INPUT_SYSTEM && REACT_INPUT_SYSTEM
+            if (UnityEngine.InputSystem.Keyboard.current?.shiftKey?.isPressed ?? false)
+                transpose = !transpose;
+#elif ENABLE_LEGACY_INPUT_MANAGER
+            if(UnityEngine.Input.GetKey(KeyCode.LeftShift) || UnityEngine.Input.GetKey(KeyCode.RightShift))
+                transpose = !transpose;
+#endif
+
+            var delta = UnityHelpers.WheelTicks(data.scrollDelta);
+            if (transpose) delta = new Vector2(delta.y, delta.x);
+
+            // The base class multiplies what it is handed by `scrollSensitivity`, so give it a tick
+            // count and the sensitivity becomes how far one tick scrolls.
+            var incoming = data.scrollDelta;
+            data.scrollDelta = delta;
+
+            var positionBefore = normalizedPosition;
+
+            // The first tick of a burst is where this gesture set off from; the ones that pile on top
+            // of a running scroll are the same gesture carrying on.
+            if (SmoothCoroutine == null) snapOrigin = new Vector2(ScrollLeft, ScrollTop);
+
+            // A tick counts from where the scroll is already headed, not from how far it has got, so
+            // that a flurry of them adds up to the sum of its ticks as it would in a browser.
+            var from = SmoothCoroutine != null ? targetPosition : positionBefore;
+            if (SmoothCoroutine != null) normalizedPosition = targetPosition;
+
+            base.OnScroll(data);
+            var target = normalizedPosition;
+
+            // Left as it arrived: the same event is bubbled on to any scroll box above this one.
+            data.scrollDelta = incoming;
+
+            normalizedPosition = positionBefore;
+
+            // Nothing of this tick fitted, so `overscroll-behavior: auto` hands the whole of it up.
+            if (Reached(Inside(target) - Inside(from)) && Chains(delta))
+            {
+                Above()?.OnScroll(data);
+                return;
+            }
+
+            FollowTo(target);
+            RequestSnap();
+        }
+
+        /// <summary>
+        /// The part of <paramref name="position"/> inside the rect's own range, which is what counts as
+        /// taken. An elastic box pulled past its end has taken nothing: the bounce is what it does when
+        /// the box above refuses the scroll, not something to absorb it instead of chaining.
+        /// </summary>
+        private static Vector2 Inside(Vector2 position) =>
+            new Vector2(Mathf.Clamp01(position.x), Mathf.Clamp01(position.y));
+
+        /// <summary>
+        /// Whether a scroll this rect could not take goes on to the box above it. The axis the gesture
+        /// runs along is the one that decides, so a contained y does not trap a sideways scroll.
+        /// </summary>
+        private bool Chains(Vector2 travel)
+        {
+            var onX = horizontal && Mathf.Abs(travel.x) >= Mathf.Abs(travel.y);
+            var onY = vertical && Mathf.Abs(travel.y) >= Mathf.Abs(travel.x);
+
+            if (onX && OverscrollX == OverscrollBehavior.Auto) return true;
+            if (onY && OverscrollY == OverscrollBehavior.Auto) return true;
+
+            // Neither: the gesture runs along an axis this box does not scroll at all, so it is not
+            // the one to decide whether the box above sees it.
+            return !onX && !onY;
+        }
+
+        /// <summary>
+        /// How far the gesture has asked this box to move since the drag began, in the points the base
+        /// class works in -- it carries the content along with the pointer one for one, so the pointer's
+        /// own travel is the whole of the ask.
+        /// </summary>
+        private Vector2 Asked(PointerEventData eventData)
+        {
+            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                viewRect, eventData.position, eventData.pressEventCamera, out var cursor)) return Vector2.zero;
+
+            return cursor - dragStartCursor;
+        }
+
+        /// <summary>The scroll box this one is inside, if any.</summary>
+        private SmoothScrollRect Above()
+        {
+            if (Component?.Parent == null) return null;
+            var above = ComponentHelpers.NearestScrollContainer(Component.Parent) as ScrollComponent;
+            return above?.ScrollRect;
+        }
+
+        /// <summary>
+        /// Close on <paramref name="target"/> from wherever the scroll is now, with no deadline -- the
+        /// wheel has no destination in mind and can move the target again next frame. What is fixed is
+        /// the fraction of the way left after <see cref="Smoothness"/>, so the speed follows the wheel
+        /// rather than the frame rate.
+        /// </summary>
+        private void FollowTo(Vector2 target)
+        {
+            // An elastic box does not clamp the delta it was handed, and a target past the end is one
+            // the position can never be set to, so the follow would never arrive.
+            targetPosition = new Vector2(Mathf.Clamp01(target.x), Mathf.Clamp01(target.y));
+
+            if (Smoothness <= 0)
+            {
+                StopSmoothing();
+                smoothVelocity = Vector2.zero;
+                normalizedPosition = targetPosition;
+                return;
+            }
+
+            // An animation carrying the scroll somewhere is given up for this, keeping its speed.
+            if (!tracking) StopSmoothing();
+
+            if (SmoothCoroutine == null)
+            {
+                tracking = true;
+                SmoothCoroutine = StartCoroutine(FollowTarget());
+            }
+        }
+
+        private IEnumerator FollowTarget()
+        {
+            var rate = -Mathf.Log(FollowRemainder) / Smoothness;
+
+            while (true)
+            {
+                yield return null;
+
+                var position = normalizedPosition;
+                var remaining = targetPosition - position;
+
+                if (Reached(remaining))
+                {
+                    normalizedPosition = targetPosition;
+                    smoothVelocity = Vector2.zero;
+                    SmoothCoroutine = null;
+                    tracking = false;
+                    yield break;
+                }
+
+                // Frame rate only decides how finely the same approach is sampled.
+                normalizedPosition = position + remaining * (1 - Mathf.Exp(-rate * Time.unscaledDeltaTime));
+                smoothVelocity = remaining * rate;
+            }
+        }
+
+        /// <summary>Whether what is left of a scroll is under the pixel it would be drawn at.</summary>
+        private bool Reached(Vector2 remaining)
+        {
+            return Mathf.Abs(remaining.x) * Mathf.Max(0, ScrollWidth - ClientWidth) < 0.5f
+                && Mathf.Abs(remaining.y) * Mathf.Max(0, ScrollHeight - ClientHeight) < 0.5f;
+        }
+
+        private void StopSmoothing()
+        {
+            if (SmoothCoroutine != null) StopCoroutine(SmoothCoroutine);
+            SmoothCoroutine = null;
+            tracking = false;
+        }
+
+        public override void OnBeginDrag(PointerEventData eventData)
+        {
+            // The pointer takes over from wherever the animation reached, rather than from where it
+            // was headed -- so a running scroll is dropped in place instead of finished first.
+            StopSmoothing();
+            smoothVelocity = Vector2.zero;
+
+            dragging = true;
+            chainedTo = null;
+            dragOrigin = normalizedPosition;
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                viewRect, eventData.position, eventData.pressEventCamera, out dragStartCursor);
+            snapOrigin = new Vector2(ScrollLeft, ScrollTop);
+            base.OnBeginDrag(eventData);
+        }
+
+        public override void OnDrag(PointerEventData eventData)
+        {
+            if (chainedTo)
+            {
+                chainedTo.OnDrag(eventData);
+                return;
+            }
+
+            base.OnDrag(eventData);
+
+            // A pointer the base class refused is not one to hand on either.
+            if (eventData.button != PointerEventData.InputButton.Left || !IsActive()) return;
+
+            // The first drag arrives in the same frame as the begin, with the pointer still where that
+            // recorded it -- so this box has been asked for nothing yet, and one asked for nothing has
+            // not failed to take it. Handing over here would give every gesture to the box above.
+            var asked = Asked(eventData);
+            if (Mathf.Abs(asked.x) < 1f && Mathf.Abs(asked.y) < 1f) return;
+
+            // Measured from where the gesture began, so a box that has moved at all keeps the rest of
+            // it -- the latching a browser does, rather than handing the gesture over at every end.
+            if (!Reached(Inside(normalizedPosition) - Inside(dragOrigin))) return;
+            if (!Chains(eventData.position - eventData.pressPosition)) return;
+
+            var above = Above();
+            if (!above) return;
+
+            // The handover is a fresh gesture for the box above, so it measures from here and there is
+            // no jump: what this one could not use is simply not counted.
+            chainedTo = above;
+            above.OnBeginDrag(eventData);
+        }
+
+        public override void OnEndDrag(PointerEventData eventData)
+        {
+            base.OnEndDrag(eventData);
+            dragging = false;
+
+            if (chainedTo)
+            {
+                var target = chainedTo;
+                chainedTo = null;
+                target.OnEndDrag(eventData);
+                return;
+            }
+
+            RequestSnap();
+        }
+
+        /// <summary>
+        /// Take a snap once the scroll settles. <paramref name="instant"/> for a snap a layout change
+        /// asked for rather than the user: CSS re-snaps on a resize without animating it.
+        /// </summary>
+        public void RequestSnap(bool instant = false)
+        {
+            snapPending = true;
+            snapInstantly = instant;
+
+            // A layout change asked for this rather than the user, so there is no travel a
+            // `scroll-snap-stop: always` target could have been passed over by.
+            if (instant) snapOrigin = new Vector2(ScrollLeft, ScrollTop);
+        }
+
+        protected override void LateUpdate()
+        {
+            base.LateUpdate();
+            UpdateSnap();
+        }
+
+        private void UpdateSnap()
+        {
+            if (!snapPending || FindSnapTarget == null) return;
+
+            // A drag is still choosing where to go, and an animation is already going somewhere.
+            if (dragging || SmoothCoroutine != null) return;
+
+            snapPending = false;
+
+            var target = FindSnapTarget(snapOrigin, Projected());
+            if (!target.HasValue) return;
+
+            // The inertia the base class would have coasted on is spent: this is the rest position now.
+            StopMovement();
+            ScrollTo(target.Value.x, target.Value.y, snapInstantly ? 0 : (float?) null);
+        }
+
+        /// <summary>
+        /// Where the scroll would come to rest untouched, which is what a snap has to measure against --
+        /// a fling is asking for the item it is thrown at, not the one under the finger when it let go.
+        /// The base class decays the velocity by <c>decelerationRate</c> per second, so the travel left
+        /// in it is <c>v / -ln(rate)</c>.
+        /// </summary>
+        private Vector2 Projected()
+        {
+            var position = new Vector2(ScrollLeft, ScrollTop);
+
+            if (inertia)
+            {
+                var rate = Mathf.Clamp(decelerationRate, 0.0001f, 0.9999f);
+                var travel = 1f / -Mathf.Log(rate);
+
+                // The content moves against the scroll offset on one axis and with it on the other.
+                position += new Vector2(-velocity.x, velocity.y) * travel;
+            }
+
+            return new Vector2(
+                Mathf.Clamp(position.x, 0, Mathf.Max(0, ScrollWidth - ClientWidth)),
+                Mathf.Clamp(position.y, 0, Mathf.Max(0, ScrollHeight - ClientHeight)));
+        }
+
+        public void ScrollBy(float? left = null, float? top = null, float? smoothness = null)
+        {
+            var sl = left ?? 0;
+            var st = top ?? 0;
+
+            ScrollTo(ScrollLeft + sl, ScrollTop + st, smoothness);
+        }
+
+        public void ScrollTo(float? left = null, float? top = null, float? smoothness = null)
+        {
+            var sl = left ?? ScrollLeft;
+            var st = top ?? ScrollTop;
+
+            var slr = Mathf.Clamp01(sl / (ScrollWidth - ClientWidth));
+            var str = Mathf.Clamp01(1 - st / (ScrollHeight - ClientHeight));
+
+            ScrollTo(normalizedPosition, new Vector2(slr, str), smoothness ?? DefaultSmoothness(), true);
+
+            // A scroll that lands off a snap point is snapped from there, the way CSS re-snaps after
+            // any scrolling operation and not only after a gesture. The snap resolves to where it
+            // already is when this was the snap, so it costs a search rather than a second animation.
+            // It starts from where it was sent, so `scroll-snap-stop` cannot cut an asked-for scroll
+            // short at an item it passes on the way.
+            snapOrigin = new Vector2(sl, st);
+            RequestSnap();
+        }
+
+        /// <summary>What an asked-for scroll animates over when it names no duration of its own.</summary>
+        private float DefaultSmoothness() => SmoothBehavior ? BehaviorSmoothness : Smoothness;
+
+        /// <param name="settle">
+        /// Whether the scroll ends where it was sent. A wheel keeps the velocity the base class coasts
+        /// on afterwards, which is half of what makes it feel smooth; a scroll aimed at a position --
+        /// a snap, a `scrollTop` -- would drift straight back off it.
+        /// </param>
+        private void ScrollTo(Vector2 positionBefore, Vector2 positionAfter, float smoothness, bool settle)
+        {
+            StopSmoothing();
+
+            if (smoothness > 0)
+            {
+                targetPosition = positionAfter;
+
+                normalizedPosition = positionBefore;
+                SmoothCoroutine = StartCoroutine(StartScroll(positionBefore, positionAfter, smoothness, settle));
+            }
+            else
+            {
+                smoothVelocity = Vector2.zero;
+                if (settle) StopMovement();
+                if (normalizedPosition != positionAfter)
+                    normalizedPosition = positionAfter;
+            }
+        }
+
+        private IEnumerator StartScroll(Vector2 from, Vector2 to, float smoothness, bool settle)
+        {
+            // The speed this scroll starts at is the speed the one it interrupted had reached, so
+            // retargeting mid-flight -- a second wheel tick, a `scrollTop` -- carries the motion on
+            // instead of restarting it. It still eases out to a stop, and still on time.
+            var initial = smoothVelocity;
+            var passed = 0f;
+
+            while (true)
+            {
+                yield return null;
+                if (settle) StopMovement();
+                passed += Time.unscaledDeltaTime;
+
+                if (passed >= smoothness)
+                {
+                    normalizedPosition = to;
+                    smoothVelocity = Vector2.zero;
+                    SmoothCoroutine = null;
+                    yield break;
+                }
+
+                var s = passed / smoothness;
+                normalizedPosition = Hermite(from, to, initial, smoothness, s);
+                smoothVelocity = HermiteVelocity(from, to, initial, smoothness, s);
+            }
+        }
+
+        /// <summary>
+        /// A cubic Hermite: where a scroll that left <paramref name="from"/> at
+        /// <paramref name="velocity"/> has got to at fraction <paramref name="s"/> of its way to
+        /// <paramref name="to"/>, arriving there with no speed left.
+        /// </summary>
+        private static Vector2 Hermite(Vector2 from, Vector2 to, Vector2 velocity, float duration, float s)
+        {
+            var s2 = s * s;
+            var s3 = s2 * s;
+
+            return from * (2 * s3 - 3 * s2 + 1)
+                + to * (3 * s2 - 2 * s3)
+                + velocity * (duration * (s3 - 2 * s2 + s));
+        }
+
+        /// <summary>How fast <see cref="Hermite"/> is moving there, which is its derivative in time.</summary>
+        private static Vector2 HermiteVelocity(Vector2 from, Vector2 to, Vector2 velocity, float duration, float s)
+        {
+            var s2 = s * s;
+
+            return (from - to) * ((6 * s2 - 6 * s) / duration)
+                + velocity * (3 * s2 - 4 * s + 1);
+        }
+    }
+}

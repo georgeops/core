@@ -1,0 +1,241 @@
+using System;
+using System.Collections.Generic;
+using ReactUnity.Helpers;
+using ReactUnity.Styling;
+using ReactUnity.UGUI.StateHandlers;
+using UnityEngine;
+
+namespace ReactUnity.UGUI
+{
+    public class UGUIContext : ReactContext
+    {
+        public new class Options : ReactContext.Options
+        {
+            public RectTransform HostElement;
+            public List<IconSet> IconSets;
+            public IconSet DefaultIconSet;
+            public CursorSet CursorSet;
+            public override bool CalculatesLayout => true;
+        }
+
+        static public Dictionary<string, Func<string, string, UGUIContext, IReactComponent>> ComponentCreators { get; }
+            = new Dictionary<string, Func<string, string, UGUIContext, IReactComponent>>
+            {
+                { "view", (tag, text, context) => new ContainerComponent(context, tag) },
+                { "text", (tag, text, context) => new TextComponent(text, context, tag) },
+                { "br", (tag, text, context) => new BrComponent(context, tag) },
+                { "richtext", (tag, text, context) => new RichTextComponent(text, context, tag) },
+                { "a", (tag, text, context) => new AnchorComponent(context, tag) },
+                { "anchor", (tag, text, context) => new AnchorComponent(context, tag) },
+                { "button", (tag, text, context) => new ButtonComponent(context) },
+                { "toggle", (tag, text, context) => new ToggleComponent(context) },
+                { "label", (tag, text, context) => new LabelComponent(context, tag) },
+                { "input", (tag, text, context) => new InputComponent(text, context) },
+                { "scroll", (tag, text, context) => new ScrollComponent(context) },
+                { "img", (tag, text, context) => new ImageComponent(context, tag) },
+                { "image", (tag, text, context) => new ImageComponent(context) },
+                { "rawimage", (tag, text, context) => new RawImageComponent(context) },
+                { "svgimage", (tag, text, context) => new SvgImageComponent(context) },
+                { "svg", (tag, text, context) => new SvgComponent(context) },
+                { "render", (tag, text, context) => new RenderComponent(context) },
+                { "object", (tag, text, context) => new ObjectComponent(context) },
+                { "video", (tag, text, context) => new VideoComponent(context) },
+                { "prefab", (tag, text, context) => new PrefabComponent(context) },
+                { "portal", (tag, text, context) => new PortalComponent(context) },
+                { "icon", (tag, text, context) => new IconComponent(text, context, tag) },
+                { "style", (tag, text, context) => new StyleComponent(context, tag, text) },
+                { "script", (tag, text, context) => new Scripting.ScriptComponent(context, tag, text) },
+                { "html", (tag, text, context) => new Html.HtmlComponent(context, tag) },
+            };
+
+
+        public override Dictionary<string, Type> StateHandlers { get; }
+            = new Dictionary<string, Type>()
+            {
+                { "active", typeof(ActiveStateHandler) },
+                { "focus", typeof(FocusStateHandler) },
+                { "focus-within", typeof(FocusWithinStateHandler) },
+                { "focus-visible", typeof(FocusVisibleStateHandler) },
+                { "hover", typeof(HoverStateHandler) },
+                { "link-hover", typeof(LinkHoverStateHandler) },
+            };
+
+        public IconSet DefaultIconSet { get; }
+        public Dictionary<string, IconSet> IconSets { get; } = new Dictionary<string, IconSet>() { };
+
+        public override CursorSet CursorSet { get; }
+
+        public RectTransform PoolRoot { get; }
+        public RectTransform OffscreenRoot { get; }
+
+        private Transform filterRoot;
+
+        /// <summary>
+        /// Where <see cref="Internal.ElementFilter"/> parks the canvas it renders a filtered subtree
+        /// on. Created on first use, and empty in a scene with no filter in it.
+        /// </summary>
+        /// <remarks>
+        /// A scene root, which is the one place it can be: each surface carries a `WorldSpace`
+        /// canvas, and a canvas nested under another inherits that one's render mode instead --
+        /// so putting these under the host would turn the offscreen pass back into an onscreen one.
+        /// Collecting them under a single object is as close as that constraint allows.
+        /// </remarks>
+        public Transform FilterRoot
+        {
+            get
+            {
+                if (!filterRoot)
+                {
+                    filterRoot = CreateNativeObject("[Filters]").transform;
+                    Disposables.Add(() => { if (filterRoot) UnityEngine.Object.Destroy(filterRoot.gameObject); });
+                }
+                return filterRoot;
+            }
+        }
+
+        private Internal.BackdropSurface backdropSurface;
+
+        /// <summary>
+        /// Where the elements that read a backdrop get one under a pipeline that has no
+        /// <c>GrabPass</c>. Created on first use, so a scene with nothing reading a backdrop -- or
+        /// one on the built-in pipeline, which grabs -- never renders a second time.
+        /// </summary>
+        /// <remarks>
+        /// Under the host rather than a scene root of its own, unlike <see cref="FilterRoot"/>:
+        /// nothing here carries a canvas, so nothing forces it out, and being in the host's subtree
+        /// is what makes it go away when the host does. A `Destroy` on a scene root is queued for
+        /// the end of the frame, which a scene close does not wait for -- so anything that put one
+        /// there during teardown outlived the scene it was made in.
+        /// </remarks>
+        public Internal.BackdropSurface BackdropSurface
+        {
+            get
+            {
+                var host = (Host as HostComponent)?.RectTransform;
+
+                // Not once the host is gone, however the context is being taken apart: a caller can
+                // reach this from a destruction cascade, and a register made then belongs to
+                // nothing. Callers with nothing to register should use ExistingBackdropSurface.
+                if (!backdropSurface && !IsDisposed && host)
+                {
+                    var go = CreateNativeObject("[BackdropSurface]", typeof(Internal.BackdropSurface));
+                    go.transform.SetParent(host, false);
+                    backdropSurface = go.GetComponent<Internal.BackdropSurface>();
+                    backdropSurface.Context = this;
+                }
+                return backdropSurface;
+            }
+        }
+
+        /// <summary>The register if there is one, without making one. For asking it what it holds,
+        /// where an empty answer and no register at all mean the same thing.</summary>
+        internal Internal.BackdropSurface ExistingBackdropSurface => backdropSurface;
+
+        public static Func<string, string, UGUIContext, UGUIComponent> defaultCreator =
+            (tag, text, context) => new ContainerComponent(context, tag);
+
+        public static Func<string, string, UGUIContext, ITextComponent> textCreator =
+            (tag, text, context) => new TextComponent(text, context, tag ?? "_text") { IsPseudoElement = true };
+
+        public Canvas RootCanvas
+        {
+            get
+            {
+                var h = (Host as HostComponent);
+                var hostCanvas = h.Canvas;
+                if (hostCanvas) return hostCanvas.rootCanvas;
+                return h.GameObject.GetComponentInParent<Canvas>()?.rootCanvas;
+            }
+        }
+
+        public UGUIContext(Options options) : base(options)
+        {
+            Host = new HostComponent(options.HostElement, this);
+            Host.ResolveStyle(true);
+
+            PoolRoot = CreateNativeObject("[Pool]", typeof(RectTransform)).GetComponent<RectTransform>();
+            PoolRoot.gameObject.SetActive(false);
+            PoolRoot.SetParent(options.HostElement, false);
+            PoolRoot.localPosition = Vector2.zero;
+            PoolRoot.pivot = Vector2.up;
+            PoolRoot.anchorMin = Vector2.up;
+            PoolRoot.anchorMax = Vector2.up;
+            PoolRoot.offsetMin = Vector2.zero;
+            PoolRoot.offsetMax = Vector2.zero;
+            PoolRoot.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, 0);
+            PoolRoot.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, 0);
+
+            OffscreenRoot = CreateNativeObject("[Offscreen]", typeof(RectTransform)).GetComponent<RectTransform>();
+            OffscreenRoot.gameObject.SetActive(false);
+            OffscreenRoot.SetParent(options.HostElement, false);
+            OffscreenRoot.localPosition = Vector2.zero;
+            OffscreenRoot.pivot = Vector2.up;
+            OffscreenRoot.anchorMin = Vector2.up;
+            OffscreenRoot.anchorMax = Vector2.up;
+            OffscreenRoot.offsetMin = Vector2.zero;
+            OffscreenRoot.offsetMax = Vector2.zero;
+            OffscreenRoot.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, 0);
+            OffscreenRoot.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, 0);
+
+            if (options.IconSets != null)
+            {
+                if (options.IconSets.Count > 0) IconSets["default"] = options.IconSets[0];
+                foreach (var ic in options.IconSets) IconSets[ic.Name] = ic;
+            }
+
+            CursorSet = options.CursorSet;
+            DefaultIconSet = options.DefaultIconSet;
+            if (DefaultIconSet == null)
+            {
+                if (IconSets.TryGetValue("default", out var def)) DefaultIconSet = def;
+            }
+        }
+
+        protected override StyleContext CreateStyleContext()
+        {
+            var ctx = base.CreateStyleContext();
+            ctx.Insert(new StyleSheet(ctx, ResourcesHelper.UseragentStylesheet?.text, -1));
+            return ctx;
+        }
+
+        protected override IReactComponent CreateDefaultComponentInternal(string tag, string text) => defaultCreator(tag, text, this);
+
+        protected override IReactComponent CreateComponentInternal(string tag, string text)
+        {
+            if (ComponentCreators.TryGetValue(tag, out var creator)) return creator(tag, text, this);
+            else return CreateDefaultComponentInternal(tag, text);
+        }
+
+        protected override ITextComponent CreateTextInternal(string tag = "_text", string text = "")
+        {
+            return textCreator(tag, text, this);
+        }
+
+        protected override IReactComponent CreatePseudoComponentInternal(string tag)
+        {
+            var tc = new TextComponent("", this, tag);
+            tc.IsPseudoElement = true;
+            return tc;
+        }
+
+        public override void PlayAudio(AudioClip clip, float volume, float pitch)
+        {
+            var source = (Host as HostComponent).GetOrAddComponent<AudioSource>();
+            source.pitch = pitch;
+            source.PlayOneShot(clip, volume);
+        }
+
+        public GameObject CreateNativeObject(string name, params Type[] components)
+        {
+            var go = new GameObject(name, components);
+            go.layer = (Host as HostComponent).GameObject.layer;
+            return go;
+        }
+
+        protected override void HandleOrphanElement(IReactComponent element)
+        {
+            if (element is UGUIComponent uc && uc.RectTransform)
+                uc.RectTransform.SetParent(OffscreenRoot, false);
+        }
+    }
+}

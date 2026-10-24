@@ -1,0 +1,413 @@
+﻿using System.Collections;
+using NUnit.Framework;
+using ReactUnity.Scripting;
+using ReactUnity.UGUI;
+using TMPro;
+using UnityEngine;
+
+namespace ReactUnity.Tests
+{
+    public class TextTests : TestBase
+    {
+        const string BaseScript = @"
+            function App() {
+                const globals = ReactUnity.useGlobals();
+                return <view id='root'>
+                    <text richText={globals.richText} id='text'>
+                        {globals.textContent ?? 'this is default text content'}
+                    </text>
+                </view>;
+            }
+        ";
+
+        const string BaseStyle = @"
+            #root {
+                align-self: flex-start;
+                width: auto;
+                height: auto;
+            }
+        ";
+
+        public UGUIComponent Cmp => Q("#root");
+        public TextComponent Text => Q("#text") as TextComponent;
+
+        public TextTests(JavascriptEngineType engineType) : base(engineType) { }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator TextPropertiesAppliedCorrectly()
+        {
+            yield return null;
+            Assert.AreEqual(false, Text.Text.richText);
+            Assert.AreEqual("this is default text content", Text.TextContent);
+
+            Component.Globals.Set("richText", true);
+            Component.Globals.Set("textContent", "some other text content");
+            yield return null;
+
+            Assert.AreEqual(true, Text.Text.richText);
+            Assert.AreEqual("some other text content", Text.TextContent);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator TextStrokeWorks()
+        {
+            InsertStyle(@"text { text-stroke: 0.5 red; }");
+            yield return null;
+            Assert.AreEqual(0.5f, Text.Text.outlineWidth);
+            Assert.AreEqual(new Color32(255, 0, 0, 255), Text.Text.outlineColor);
+
+            InsertStyle(@"text { text-stroke-width: 0.4; }");
+            yield return null;
+            Assert.AreEqual(0.4f, Text.Text.outlineWidth);
+            Assert.AreEqual(new Color32(255, 0, 0, 255), Text.Text.outlineColor);
+
+            InsertStyle(@"text { text-stroke-color: blue; }");
+            yield return null;
+            Assert.AreEqual(0.4f, Text.Text.outlineWidth);
+            Assert.AreEqual(new Color32(0, 0, 255, 255), Text.Text.outlineColor);
+
+            // The longhand reads its width the way the shorthand does, units included.
+            InsertStyle(@"text { text-stroke: 1px red; }");
+            yield return null;
+            Assert.AreEqual(1f, Text.Text.outlineWidth);
+
+            InsertStyle(@"text { text-stroke-width: 0.25px; }");
+            yield return null;
+            Assert.AreEqual(0.25f, Text.Text.outlineWidth);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator TextDecorationColorWrapsTheContent()
+        {
+            Component.Globals.Set("richText", true);
+            Component.Globals.Set("textContent", "abc");
+            InsertStyle(@"text { color: white; text-decoration: underline red; }");
+            yield return null;
+
+            // TMP has no per-element underline colour, so a differing one arrives as a tag.
+            Assert.AreEqual("<u color=#FF0000FF>abc</u>", Text.Text.text);
+            // The tags are TMP's business: `textContent` and `:empty` keep seeing the content.
+            Assert.AreEqual("abc", Text.Content);
+            Assert.AreEqual("abc", Text.TextContent);
+
+            // A colour matching `color` needs no tag -- that is what TMP draws the line in already.
+            InsertStyle(@"text { text-decoration-color: white; }");
+            yield return null;
+            Assert.AreEqual("abc", Text.Text.text);
+
+            // Each line gets its own tag, and the pair nests.
+            InsertStyle(@"text { text-decoration: underline line-through blue; }");
+            yield return null;
+            Assert.AreEqual("<u color=#0000FFFF><s color=#0000FFFF>abc</s></u>", Text.Text.text);
+
+            // Without a line there is nothing to colour.
+            InsertStyle(@"text { text-decoration-line: none; }");
+            yield return null;
+            Assert.AreEqual("abc", Text.Text.text);
+
+            InsertStyle(@"text { text-decoration-line: underline; }");
+            yield return null;
+            Assert.AreEqual("<u color=#0000FFFF>abc</u>", Text.Text.text);
+
+            // With rich text off the tags would draw as characters, so none are emitted.
+            Component.Globals.Set("richText", false);
+            yield return null;
+            Assert.AreEqual("abc", Text.Text.text);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator OverflowAndMaskDoesNotBreakText()
+        {
+            InsertStyle(@"text {
+                overflow: hidden;
+                mask-image: url(res:ReactUnity/tests/sprites/star);
+            }");
+            yield return null;
+            Assert.IsNotNull(Text);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator TextCanBeWrappedWithLinkedStyle()
+        {
+            var textContent = "this is default text content";
+            Globals["textContent"] = textContent;
+
+            Text.Style["text-overflow"] = "linked";
+            Assert.IsNull(Text.LinkedTextWatcher?.LinkedText);
+            yield return null;
+            Assert.IsNull(Text.LinkedTextWatcher?.LinkedText);
+
+            Text.Style["width"] = 80;
+            Text.Style["max-height"] = "2em";
+            yield return null;
+            // TODO: make this able to render in 1 frame
+            yield return null;
+            Assert.IsNotNull(Text.LinkedTextWatcher?.LinkedText);
+
+            var overflowAt = Text.Text.firstOverflowCharacterIndex;
+            Assert.AreEqual(1, Text.LinkedTextWatcher.LinkedText.Text.pageToDisplay);
+            Assert.AreEqual(overflowAt, Text.LinkedTextWatcher.LinkedText.Text.firstVisibleCharacter);
+            Assert.AreEqual(textContent, Text.LinkedTextWatcher.LinkedText.Text.text);
+
+
+            Text.Style["text-overflow"] = null;
+            yield return null;
+            Assert.IsNull(Text.LinkedTextWatcher?.LinkedText);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator EmptyTextShouldHaveZeroSize()
+        {
+            Globals["textContent"] = "";
+            yield return null;
+            yield return null;
+
+            Assert.AreEqual(0, Cmp.ClientHeight);
+
+            InsertStyle(@"
+                #root::before {
+                    content: '';
+                }
+            ");
+            yield return null;
+            yield return null;
+
+            Assert.AreEqual(0, Cmp.ClientHeight);
+
+
+            Globals["textContent"] = "some text";
+            yield return null;
+            yield return null;
+
+            Assert.AreEqual(19, Cmp.ClientHeight);
+
+
+            InsertStyle(@"
+                #root::before {
+                    content: 'some before';
+                }
+            ");
+            yield return null;
+            yield return null;
+
+            Assert.AreEqual(38, Cmp.ClientHeight);
+        }
+
+
+        [UGUITest(Script = @"
+            function App() {
+                const globals = ReactUnity.useGlobals();
+                return <view id='root'>
+                    <richtext id='text'>
+                        <color value='red'>
+                            Red
+                            {!globals.hideBlue && <color value = 'blue'>
+                                Blue
+                            </color>}
+                        </color> Normal <br />
+                        Hey
+                    </richtext>
+                </view>;
+            }
+", Style = BaseStyle)]
+        public IEnumerator InlineRichTextShouldWork()
+        {
+            Assert.AreEqual("<color=red>Red<color=blue>Blue</color></color> Normal <br>Hey", Text.Text.text);
+            yield return null;
+
+            Globals["hideBlue"] = true;
+            yield return null;
+            Assert.AreEqual("<color=red>Red</color> Normal <br>Hey", Text.Text.text);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle, AutoRender = false)]
+        public IEnumerator TextSizeShouldIncreaseImmediateOnLongerText()
+        {
+            yield return null;
+            var str = "my text somewhat short";
+            Component.Globals.Set("textContent", str);
+            Render();
+            yield return null;
+
+            var initialWidth = Text.ClientWidth;
+
+            Assert.Greater(initialWidth, 50);
+
+            Component.Globals.Set("textContent", str + " but now longer");
+            yield return null;
+
+            var newWidth = Text.ClientWidth;
+
+            Assert.Greater(newWidth, initialWidth);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator TextAlignAndVerticalAlignWorks()
+        {
+            var v = Q("#root");
+            var t = (Q("#text") as TextComponent).Text;
+
+            Assert.AreEqual(TextAlignmentOptions.TopLeft, t.alignment);
+            yield return null;
+
+
+            v.Style["text-align"] = "topleft";
+            yield return null;
+            Assert.AreEqual(TextAlignmentOptions.TopLeft, t.alignment);
+
+
+            v.Style["text-align"] = "top";
+            yield return null;
+            Assert.AreEqual(TextAlignmentOptions.Top, t.alignment);
+
+            v.Style["text-align"] = "bottom-right";
+            yield return null;
+            Assert.AreEqual(TextAlignmentOptions.BottomRight, t.alignment);
+
+
+            v.Style["text-align"] = "bottom-right";
+            v.Style["vertical-align"] = "geometry";
+            yield return null;
+            Assert.AreEqual(TextAlignmentOptions.BottomRight, t.alignment);
+
+            v.Style["text-align"] = "right";
+            v.Style["vertical-align"] = "baseline";
+            yield return null;
+            Assert.AreEqual(TextAlignmentOptions.BaselineRight, t.alignment);
+
+            v.Style["text-align"] = null;
+            v.Style["vertical-align"] = "baseline";
+            yield return null;
+            Assert.AreEqual(TextAlignmentOptions.BaselineLeft, t.alignment);
+
+            v.Style["text-align"] = "right";
+            v.Style["text-align"] = "";
+            v.Style["vertical-align"] = "baseline";
+            yield return null;
+            Assert.AreEqual(TextAlignmentOptions.BaselineLeft, t.alignment);
+
+            v.Style["text-align"] = "right";
+            v.Style["text-align"] = "a";
+            v.Style["vertical-align"] = "baseline";
+            yield return null;
+            Assert.AreEqual(TextAlignmentOptions.BaselineRight, t.alignment);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator TextShouldTakeMaxLinesIntoAccountWhenCalculatingSize()
+        {
+            var t = (Q("#text") as TextComponent).Text;
+
+            Component.Globals.Set("textContent",
+@"Line 1
+Line 2
+Line 3
+Line 4
+Line 5
+Line 6");
+
+            yield return null;
+
+            var height = t.rectTransform.rect.height;
+            Assert.AreEqual(113, height, 10);
+
+
+            Text.Style["max-lines"] = "3";
+            yield return null;
+            yield return null;
+
+            height = t.rectTransform.rect.height;
+            Assert.AreEqual(55, height, 10);
+
+
+
+            Text.Style["max-lines"] = "9";
+            yield return null;
+            yield return null;
+
+            height = t.rectTransform.rect.height;
+            Assert.AreEqual(113, height, 10);
+
+
+
+            Text.Style["max-lines"] = "5";
+            yield return null;
+            yield return null;
+
+            height = t.rectTransform.rect.height;
+            Assert.AreEqual(94, height, 10);
+
+
+
+            Text.Style["max-lines"] = "6";
+            yield return null;
+            yield return null;
+            height = t.rectTransform.rect.height;
+            Assert.AreEqual(113, height, 10);
+        }
+
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator GlyphsPaintOverTheTextsOwnBackground()
+        {
+            if (TestHelpers.IsNoGraphics()) Assert.Inconclusive("Needs a graphics device to read pixels back.");
+
+            InsertStyle(@"#text { background-color: red; color: white; font-size: 60px; padding: 10px; }");
+            yield return null;
+            yield return null;
+
+            var corners = new Vector3[4];
+            Text.RectTransform.GetWorldCorners(corners);
+            var cam = Camera.main;
+            var min = RectTransformUtility.WorldToScreenPoint(cam, corners[0]);
+            var max = RectTransformUtility.WorldToScreenPoint(cam, corners[2]);
+
+            // Sampled inside the padding, so an edge pixel of whatever is behind cannot pass for a glyph.
+            var capture = Assertions.CaptureScreenshot();
+            int red = 0, white = 0;
+            for (int y = Mathf.CeilToInt(min.y) + 5; y < Mathf.FloorToInt(max.y) - 5; y++)
+                for (int x = Mathf.CeilToInt(min.x) + 5; x < Mathf.FloorToInt(max.x) - 5; x++)
+                {
+                    var c = capture.GetPixel(x, y);
+                    if (c.r > 0.8f && c.g < 0.2f && c.b < 0.2f) red++;
+                    else if (c.r > 0.8f && c.g > 0.8f && c.b > 0.8f) white++;
+                }
+            Object.Destroy(capture);
+
+            Assert.Greater(red, 0, "The background was not drawn");
+            Assert.Greater(white, 0, "The glyphs are under the background");
+
+            // They paint after it because they live on a child kept after the background object.
+            var glyphs = Text.Text.transform;
+            Assert.AreEqual(Text.RectTransform, glyphs.parent);
+            Assert.AreEqual(Text.RectTransform.childCount - 1, glyphs.GetSiblingIndex());
+        }
+
+        // That child stretches over the whole element, so nothing keeps the glyphs out of the
+        // padding unless it is inset by it -- and the box is measured with the padding counted, so
+        // an uninset line ends short of its own edge and leaves the gap on one side.
+        [UGUITest(Script = BaseScript, Style = BaseStyle)]
+        public IEnumerator PaddingAndBorderKeepTheGlyphsInTheContentBox()
+        {
+            yield return null;
+            var glyphs = Text.Text.rectTransform;
+            Assert.AreEqual(Vector2.zero, glyphs.offsetMin);
+            Assert.AreEqual(Vector2.zero, glyphs.offsetMax);
+
+            InsertStyle(@"#text { padding: 4px 10px; }");
+            yield return null;
+            yield return null;
+            Assert.AreEqual(new Vector2(10, 4), glyphs.offsetMin);
+            Assert.AreEqual(new Vector2(-10, -4), glyphs.offsetMax);
+
+            // A border is outside the content box too, and the two insets add up.
+            InsertStyle(@"#text { border: 2px solid red; }");
+            yield return null;
+            yield return null;
+            Assert.AreEqual(new Vector2(12, 6), glyphs.offsetMin);
+            Assert.AreEqual(new Vector2(-12, -6), glyphs.offsetMax);
+
+            Assert.AreEqual(Text.RectTransform.rect.width - 24, glyphs.rect.width, 0.01f);
+            Assert.AreEqual(Text.RectTransform.rect.height - 12, glyphs.rect.height, 0.01f);
+        }
+    }
+}
